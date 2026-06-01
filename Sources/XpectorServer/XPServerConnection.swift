@@ -113,6 +113,81 @@ extension XPServerConnection: XPTransportDelegate {
                 }
             }
 
+        // MARK: - Network
+
+        case .requestRecentNetwork:
+            let request = (try? message.decode(XPRecentNetworkRequest.self)) ?? XPRecentNetworkRequest()
+            let entries = XpectorServer.shared.getNetworkCapture()?.recentEntries(limit: request.limit, domainFilter: request.domainFilter) ?? []
+            sendResponse(type: .recentNetworkData, content: entries)
+
+        // MARK: - Navigation
+
+        case .requestNavState:
+            DispatchQueue.main.async { [weak self] in
+                let state = XPNavigationCapture.captureCurrentState()
+                self?.sendResponse(type: .navStateData, content: state)
+            }
+
+        // MARK: - Context
+
+        case .requestContext:
+            let request = (try? message.decode(XPContextRequest.self)) ?? XPContextRequest()
+            DispatchQueue.main.async { [weak self] in
+                let server = XpectorServer.shared
+                let keychainSummary: [String: Int]
+                #if DEBUG
+                keychainSummary = server.getKeychainCapture()?.summaryCounts() ?? [:]
+                #else
+                keychainSummary = [:]
+                #endif
+                let snapshot = XPContextCapture.capture(
+                    request: request,
+                    networkCapture: server.getNetworkCapture(),
+                    perfCapture: server.getPerformanceCapture(),
+                    keychainSummary: keychainSummary,
+                    logEntries: server.getRecentLogEntries()
+                )
+                self?.sendResponse(type: .contextData, content: snapshot)
+            }
+
+        // MARK: - Keychain
+
+        #if DEBUG
+        case .requestKeychainItems:
+            let request = (try? message.decode(XPKeychainRequest.self)) ?? XPKeychainRequest()
+            let snapshot = XpectorServer.shared.getKeychainCapture()?.queryItems(request: request)
+                ?? XPKeychainSnapshot(items: [])
+            sendResponse(type: .keychainItemsData, content: snapshot)
+
+        case .modifyKeychainItem:
+            guard let modification = try? message.decode(XPKeychainModification.self) else {
+                sendResponse(type: .modifyKeychainResponse, content: XPKeychainModificationResponse(success: false, error: "failed to decode"))
+                return
+            }
+            let response = XpectorServer.shared.getKeychainCapture()?.modifyItem(modification)
+                ?? XPKeychainModificationResponse(success: false, error: "keychain capture not available")
+            sendResponse(type: .modifyKeychainResponse, content: response)
+        #endif
+
+        // MARK: - Concurrency / Threads
+
+        case .requestThreadSnapshot:
+            let snapshot = XPConcurrencyCapture.captureSnapshot()
+            sendResponse(type: .threadSnapshotData, content: snapshot)
+
+        // MARK: - Observer Map (not implemented in v1)
+
+        case .requestObserverMap:
+            let emptyMap = XPObserverMap(entries: [])
+            sendResponse(type: .observerMapData, content: emptyMap)
+
+        // MARK: - Performance Summary
+
+        case .requestPerfSummary:
+            let summary = XpectorServer.shared.getPerformanceCapture()?.currentSummary()
+                ?? XPPerfSummary(currentFPS: 0, avgFPS: 0, memoryUsageMB: 0, peakMemoryMB: 0, recentHangCount: 0, droppedFrames: 0, uptimeSeconds: 0)
+            sendResponse(type: .perfSummaryData, content: summary)
+
         default:
             break
         }

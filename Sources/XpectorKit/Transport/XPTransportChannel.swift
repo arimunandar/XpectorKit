@@ -64,8 +64,9 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
     // MARK: - Server (iOS side) - Listen on a port
 
     public func listen(onPort port: UInt16) {
-        guard let ch = XP_PTChannel(delegate: self) else { return }
-        ch.listen(onPort: port, iPv4Address: INADDR_LOOPBACK) { [weak self] error in
+        let proto = XP_PTProtocol(dispatchQueue: queue)!
+        guard let ch = XP_PTChannel(with: proto, delegate: self) else { return }
+        ch.listen(onPort: port, iPv4Address: INADDR_LOOPBACK) { [weak self] (error: (any Error)?) in
             guard let self else { return }
             if let error {
                 self.delegate?.transport(self, didFailWithError: error)
@@ -99,16 +100,25 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
 
 extension XPTransportChannel: XP_PTChannelDelegate {
     public func ioFrameChannel(_ channel: XP_PTChannel, didReceiveFrameOfType type: UInt32, tag: UInt32, payload: XP_PTData?) {
-        guard let payload else { return }
-        let data = Data(bytes: payload.data, count: payload.length)
+        NSLog("[Xpector] didReceiveFrame type=%u tag=%u payloadLen=%d", type, tag, payload?.length ?? -1)
+        let data: Data
+        if let payload {
+            data = Data(bytes: payload.data, count: payload.length)
+        } else {
+            data = Data()
+        }
 
-        guard let messageType = XPMessageType(rawValue: type) else { return }
+        guard let messageType = XPMessageType(rawValue: type) else {
+            NSLog("[Xpector] unknown message type: %u", type)
+            return
+        }
 
         let message = XPMessage(type: messageType, payload: data)
         delegate?.transport(self, didReceiveMessage: message)
     }
 
     public func ioFrameChannel(_ channel: XP_PTChannel, didEndWithError error: (any Error)?) {
+        NSLog("[Xpector] channel ended error=%@", error?.localizedDescription ?? "nil")
         if channel === peerChannel {
             peerChannel = nil
         }
@@ -116,6 +126,7 @@ extension XPTransportChannel: XP_PTChannelDelegate {
     }
 
     public func ioFrameChannel(_ channel: XP_PTChannel, didAcceptConnection otherChannel: XP_PTChannel, from address: XP_PTAddress) {
+        NSLog("[Xpector] didAcceptConnection from %@", address)
         if peerChannel != nil {
             peerChannel?.close()
         }

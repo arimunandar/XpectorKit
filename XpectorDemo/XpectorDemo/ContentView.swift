@@ -4,14 +4,51 @@ import XpectorServer
 
 private let logger = XPLogger(category: "Demo")
 
+private let monitoredSession = XPNetworkCapture.shared.monitoredSession(configuration: .default)
+
 struct ContentView: View {
     @State private var logCount = 0
     @State private var defaultsKey = "demo_counter"
     @State private var defaultsValue = 0
+    @State private var networkStatus = ""
 
     var body: some View {
         NavigationStack {
             List {
+                Section("Network (monitored)") {
+                    Button("Fire all sample requests") {
+                        fetchURL("https://httpbin.org/get")
+                        fetchURL("https://jsonplaceholder.typicode.com/posts?_limit=3")
+                        postURL("https://httpbin.org/post", body: ["demo": "xpector", "ts": "\(Date())"])
+                        fetchURL("https://httpbin.org/status/404")
+                    }
+                    Button("GET httpbin.org/get") {
+                        fetchURL("https://httpbin.org/get")
+                    }
+
+                    Button("GET jsonplaceholder posts") {
+                        fetchURL("https://jsonplaceholder.typicode.com/posts?_limit=5")
+                    }
+
+                    Button("POST httpbin.org/post") {
+                        postURL("https://httpbin.org/post", body: ["demo": "xpector", "count": "\(logCount)"])
+                    }
+
+                    Button("GET 404 (httpbin.org/status/404)") {
+                        fetchURL("https://httpbin.org/status/404")
+                    }
+
+                    Button("GET slow (2s delay)") {
+                        fetchURL("https://httpbin.org/delay/2")
+                    }
+
+                    if !networkStatus.isEmpty {
+                        Text(networkStatus)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Section("stdout / stderr") {
                     Button("print() message") {
                         logCount += 1
@@ -137,6 +174,11 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("Xpector Demo")
+            .onAppear {
+                fetchURL("https://httpbin.org/get")
+                postURL("https://httpbin.org/post", body: ["hello": "xpector"])
+                fetchURL("https://jsonplaceholder.typicode.com/posts?_limit=2&userId=1")
+            }
             .safeAreaInset(edge: .bottom) {
                 Text("Total logs sent: \(logCount)")
                     .font(.caption)
@@ -146,5 +188,41 @@ struct ContentView: View {
                     .background(.bar)
             }
         }
+    }
+
+    private func fetchURL(_ urlString: String) {
+        guard let url = URL(string: urlString) else { return }
+        networkStatus = "Loading..."
+        monitoredSession.dataTask(with: url) { data, response, error in
+            let http = response as? HTTPURLResponse
+            DispatchQueue.main.async {
+                if let error {
+                    networkStatus = "Error: \(error.localizedDescription)"
+                } else {
+                    let bytes = data?.count ?? 0
+                    networkStatus = "\(http?.statusCode ?? 0) — \(bytes) bytes"
+                }
+            }
+        }.resume()
+    }
+
+    private func postURL(_ urlString: String, body: [String: String]) {
+        guard let url = URL(string: urlString) else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONEncoder().encode(body)
+        networkStatus = "Posting..."
+        monitoredSession.dataTask(with: request) { data, response, error in
+            let http = response as? HTTPURLResponse
+            DispatchQueue.main.async {
+                if let error {
+                    networkStatus = "Error: \(error.localizedDescription)"
+                } else {
+                    let bytes = data?.count ?? 0
+                    networkStatus = "\(http?.statusCode ?? 0) — \(bytes) bytes"
+                }
+            }
+        }.resume()
     }
 }
