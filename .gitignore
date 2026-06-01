@@ -17,6 +17,9 @@ xcuserdata/
 *.dSYM
 Pods/
 
+# Generated
+*.xcodeproj
+
 # OS
 .DS_Store
 
