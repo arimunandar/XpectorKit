@@ -89,10 +89,12 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
     // MARK: - Disconnect
 
     public func disconnect() {
-        peerChannel?.close()
+        let peer = peerChannel
+        let ch = channel
         peerChannel = nil
-        channel?.close()
         channel = nil
+        peer?.close()
+        ch?.close()
     }
 }
 
@@ -100,7 +102,6 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
 
 extension XPTransportChannel: XP_PTChannelDelegate {
     public func ioFrameChannel(_ channel: XP_PTChannel, didReceiveFrameOfType type: UInt32, tag: UInt32, payload: XP_PTData?) {
-        NSLog("[Xpector] didReceiveFrame type=%u tag=%u payloadLen=%d", type, tag, payload?.length ?? -1)
         let data: Data
         if let payload {
             data = Data(bytes: payload.data, count: payload.length)
@@ -109,7 +110,6 @@ extension XPTransportChannel: XP_PTChannelDelegate {
         }
 
         guard let messageType = XPMessageType(rawValue: type) else {
-            NSLog("[Xpector] unknown message type: %u", type)
             return
         }
 
@@ -118,7 +118,6 @@ extension XPTransportChannel: XP_PTChannelDelegate {
     }
 
     public func ioFrameChannel(_ channel: XP_PTChannel, didEndWithError error: (any Error)?) {
-        NSLog("[Xpector] channel ended error=%@", error?.localizedDescription ?? "nil")
         if channel === peerChannel {
             peerChannel = nil
         }
@@ -126,7 +125,6 @@ extension XPTransportChannel: XP_PTChannelDelegate {
     }
 
     public func ioFrameChannel(_ channel: XP_PTChannel, didAcceptConnection otherChannel: XP_PTChannel, from address: XP_PTAddress) {
-        NSLog("[Xpector] didAcceptConnection from %@", address)
         if peerChannel != nil {
             peerChannel?.close()
         }

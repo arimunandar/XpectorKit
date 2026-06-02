@@ -82,7 +82,7 @@ final class XPPerformanceCapture: @unchecked Sendable {
 
         if lastTimestamp > 0 {
             let frameDuration = timestamp - lastTimestamp
-            let expectedDuration = 1.0 / 60.0
+            let expectedDuration = link.targetTimestamp - link.timestamp
 
             if frameDuration > 0 {
                 currentFPS = 1.0 / frameDuration

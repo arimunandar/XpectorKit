@@ -20,7 +20,22 @@ final class XPNotificationCapture: @unchecked Sendable {
         "_UI",
         "NS",
         "com.apple.",
+        "UIKeyboard",
+        "UIApplication",
+        "UIWindow",
+        "UIScene",
+        "UITextInput",
+        "UIDevice",
+        "UIMenu",
+        "UIAccessibility",
+        "UIFocusSystem",
+        "AVAudioSession",
+        "_UICompat",
+        "AX",
     ]
+
+    private static var eventCount = 0
+    private static var windowStart: Date = Date()
 
     init(onEvent: @escaping (XPNotificationEvent) -> Void) {
         self.onEvent = onEvent
@@ -65,6 +80,15 @@ final class XPNotificationCapture: @unchecked Sendable {
         guard let instance = activeInstance, instance.isCapturing else { return }
 
         let rawName = name.rawValue
+
+        // Rate limiting — max 50 events per second
+        let now = Date()
+        if now.timeIntervalSince(windowStart) > 1.0 {
+            eventCount = 0
+            windowStart = now
+        }
+        eventCount += 1
+        if eventCount > 50 { return }
 
         // Check blocklist
         for prefix in blockedPrefixes {

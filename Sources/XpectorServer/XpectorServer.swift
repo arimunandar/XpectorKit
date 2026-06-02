@@ -14,26 +14,41 @@ public final class XpectorServer: @unchecked Sendable {
     private var navigationCapture: XPNavigationCapture?
     private var notificationCapture: XPNotificationCapture?
     private var performanceCapture: XPPerformanceCapture?
+    private var hangDetector: XPHangDetector?
     #if DEBUG
     private var keychainCapture: XPKeychainCapture?
     #endif
     private var isRunning = false
+    private var config = XPConfiguration()
+    private let stateQueue = DispatchQueue(label: "com.xpector.server.state")
 
-    /// Rolling buffer of recent log entries for on-demand queries (e.g. context capture).
+    private var cachedConnection: XPServerConnection?
+    private var cachedLogBufferSize: Int = 100
+
     private let logBufferLock = NSLock()
     private var logBuffer: [XPLogEntry] = []
-    private static let logBufferMax = 100
 
     private init() {}
 
     public func start(port: UInt16? = nil) {
-        guard !isRunning else { return }
-        isRunning = true
+        var config = XPConfiguration()
+        if let port { config.port = port }
+        start(config: config)
+    }
 
-        let selectedPort = port ?? XPConstants.simulatorPortRange.lowerBound
+    public func start(config: XPConfiguration) {
+        let shouldStart: Bool = stateQueue.sync {
+            guard !isRunning else { return false }
+            isRunning = true
+            self.config = config
+            return true
+        }
+        guard shouldStart else { return }
 
-        connection = XPServerConnection(port: selectedPort)
-        connection?.onConnected = { [weak self] in
+        let selectedPort = config.port
+
+        let conn = XPServerConnection(port: selectedPort)
+        conn.onConnected = { [weak self] in
             self?.sendAppInfo()
             let welcome = XPLogEntry(message: "XpectorServer connected — log streaming active", source: .stdout, category: .info)
             self?.send(entry: welcome)
@@ -41,7 +56,10 @@ public final class XpectorServer: @unchecked Sendable {
                 self?.send(entry: pendingCrash, type: .crash)
             }
         }
-        connection?.start()
+        conn.start()
+        connection = conn
+        cachedConnection = conn
+        cachedLogBufferSize = config.logBufferSize
 
         logCapture = XPLogCapture { [weak self] entry in
             self?.send(entry: entry)
@@ -63,26 +81,57 @@ public final class XpectorServer: @unchecked Sendable {
         }
         userDefaultsMonitor?.start()
 
-        networkCapture = XPNetworkCapture.shared
-        networkCapture?.onEntry = { [weak self] entry in
-            guard let msg = try? XPMessage(type: .networkEvent, content: entry) else { return }
-            self?.connection?.send(message: msg)
-        }
-        networkCapture?.start()
-
-        navigationCapture = XPNavigationCapture { [weak self] event in
-            guard let msg = try? XPMessage(type: .navEvent, content: event) else { return }
-            self?.connection?.send(message: msg)
-        }
-        navigationCapture?.start()
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            guard let self, self.isRunning else { return }
-            self.performanceCapture = XPPerformanceCapture { [weak self] event in
-                guard let msg = try? XPMessage(type: .perfEvent, content: event) else { return }
-                self?.connection?.send(message: msg)
+        if config.enableNetworkCapture {
+            let network = XPNetworkCapture.shared
+            network.onEntry = { [weak self] entry in
+                guard let msg = try? XPMessage(type: .networkEvent, content: entry) else { return }
+                self?.cachedConnection?.send(message: msg)
             }
-            self.performanceCapture?.start()
+            network.start()
+            networkCapture = network
+        }
+
+        if config.enableNavigationCapture {
+            let nav = XPNavigationCapture { [weak self] event in
+                guard let msg = try? XPMessage(type: .navEvent, content: event) else { return }
+                self?.cachedConnection?.send(message: msg)
+            }
+            nav.start()
+            navigationCapture = nav
+        }
+
+        if config.enablePerformanceCapture {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                guard let self, self.isRunning else { return }
+                let perf = XPPerformanceCapture { [weak self] event in
+                    guard let msg = try? XPMessage(type: .perfEvent, content: event) else { return }
+                    self?.cachedConnection?.send(message: msg)
+                }
+                perf.start()
+                self.performanceCapture = perf
+            }
+        }
+
+        if config.enableNotificationCapture {
+            let notif = XPNotificationCapture { [weak self] event in
+                guard let msg = try? XPMessage(type: .notificationEvent, content: event) else { return }
+                self?.cachedConnection?.send(message: msg)
+            }
+            notif.start()
+            notificationCapture = notif
+        }
+
+        if config.enableHangDetection {
+            let thresholdMs = config.hangThresholdMs
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                guard let self, self.isRunning else { return }
+                let hang = XPHangDetector(thresholdMs: thresholdMs) { [weak self] event in
+                    guard let msg = try? XPMessage(type: .perfEvent, content: event) else { return }
+                    self?.cachedConnection?.send(message: msg)
+                }
+                hang.start()
+                self.hangDetector = hang
+            }
         }
 
         #if DEBUG
@@ -91,58 +140,79 @@ public final class XpectorServer: @unchecked Sendable {
     }
 
     public func stop() {
-        guard isRunning else { return }
-        isRunning = false
+        // Atomically check and flip isRunning, then snapshot all capture modules
+        let snapshot: (
+            log: XPLogCapture?,
+            osLog: XPOSLogCapture?,
+            udMonitor: XPUserDefaultsMonitor?,
+            network: XPNetworkCapture?,
+            nav: XPNavigationCapture?,
+            notif: XPNotificationCapture?,
+            perf: XPPerformanceCapture?,
+            hang: XPHangDetector?,
+            conn: XPServerConnection?
+        ) = stateQueue.sync {
+            guard isRunning else {
+                return (nil, nil, nil, nil, nil, nil, nil, nil, nil)
+            }
+            isRunning = false
 
-        logCapture?.stop()
-        logCapture = nil
+            let s = (logCapture, osLogCapture, userDefaultsMonitor, networkCapture,
+                     navigationCapture, notificationCapture, performanceCapture,
+                     hangDetector, connection)
 
-        osLogCapture?.stop()
-        osLogCapture = nil
+            logCapture = nil
+            osLogCapture = nil
+            userDefaultsMonitor = nil
+            networkCapture = nil
+            navigationCapture = nil
+            notificationCapture = nil
+            performanceCapture = nil
+            hangDetector = nil
+            #if DEBUG
+            keychainCapture = nil
+            #endif
+            connection = nil
 
-        userDefaultsMonitor?.stop()
-        userDefaultsMonitor = nil
+            return s
+        }
 
-        networkCapture?.stop()
-        networkCapture?.onEntry = nil
-        networkCapture = nil
+        // If isRunning was already false, the snapshot is all-nil; nothing to do
+        guard snapshot.conn != nil || snapshot.log != nil else { return }
 
-        navigationCapture?.stop()
-        navigationCapture = nil
+        snapshot.log?.stop()
+        snapshot.osLog?.stop()
+        snapshot.udMonitor?.stop()
 
-        notificationCapture?.stop()
-        notificationCapture = nil
+        snapshot.network?.stop()
+        snapshot.network?.onEntry = nil
 
-        performanceCapture?.stop()
-        performanceCapture = nil
-
-        #if DEBUG
-        keychainCapture = nil
-        #endif
+        snapshot.nav?.stop()
+        snapshot.notif?.stop()
+        snapshot.perf?.stop()
+        snapshot.hang?.stop()
 
         logBufferLock.lock()
         logBuffer.removeAll()
         logBufferLock.unlock()
 
-        connection?.stop()
-        connection = nil
+        snapshot.conn?.stop()
     }
 
     func sendDirect(message: XPMessage) {
-        connection?.send(message: message)
+        cachedConnection?.send(message: message)
     }
 
     private func send(entry: XPLogEntry, type: XPMessageType = .logData) {
-        // Append to rolling log buffer for on-demand queries
         logBufferLock.lock()
         logBuffer.append(entry)
-        if logBuffer.count > Self.logBufferMax {
-            logBuffer.removeFirst(logBuffer.count - Self.logBufferMax)
+        if logBuffer.count > cachedLogBufferSize {
+            logBuffer.removeFirst(logBuffer.count - cachedLogBufferSize)
         }
         logBufferLock.unlock()
 
         guard let message = try? XPMessage(type: type, content: entry) else { return }
-        connection?.send(message: message)
+        cachedConnection?.send(message: message)
     }
 
     // MARK: - Capture Module Accessors (for XPServerConnection)
@@ -169,7 +239,7 @@ public final class XpectorServer: @unchecked Sendable {
             serverVersion: XPConstants.protocolVersion
         )
         guard let message = try? XPMessage(type: .appInfo, content: info) else { return }
-        connection?.send(message: message)
+        cachedConnection?.send(message: message)
     }
 
     private func deviceType() -> String {

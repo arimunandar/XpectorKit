@@ -362,7 +362,6 @@ static const uint8_t kUserInfoKey;
 
   dispatch_source_set_event_handler(dispatchObj_source_, ^{
       unsigned long nconns = dispatch_source_get_data(self->dispatchObj_source_);
-      NSLog(@"[Xpector-PT] dispatch source fired, nconns=%lu fd=%d", nconns, fd);
     while ([self acceptIncomingConnection:fd] && --nconns);
   });
 
@@ -379,7 +378,6 @@ static const uint8_t kUserInfoKey;
   dispatch_resume(dispatchObj_source_);
 
   connState_ = kConnStateListening;
-  NSLog(@"[Xpector-PT] listening on port %d, fd=%d, source=%@", port, fd, dispatchObj_source_);
   if (callback) callback(nil);
 }
 
@@ -388,7 +386,6 @@ static const uint8_t kUserInfoKey;
   struct sockaddr_in addr;
   socklen_t addrLen = sizeof(addr);
   dispatch_fd_t clientSocketFD = accept(serverSocketFD, (struct sockaddr*)&addr, &addrLen);
-  NSLog(@"[Xpector-PT] accept() returned fd=%d", clientSocketFD);
 
   if (clientSocketFD == -1) {
     perror("accept()");
