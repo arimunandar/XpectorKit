@@ -15,6 +15,7 @@ public final class XpectorServer: @unchecked Sendable {
     private var notificationCapture: XPNotificationCapture?
     private var performanceCapture: XPPerformanceCapture?
     private var hangDetector: XPHangDetector?
+    private var leakDetector: XPLeakDetector?
     #if DEBUG
     private var keychainCapture: XPKeychainCapture?
     #endif
@@ -160,6 +161,19 @@ public final class XpectorServer: @unchecked Sendable {
             }
         }
 
+        if config.enableLeakDetection {
+            let delayMs = config.leakCheckDelayMs
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isRunning else { return }
+                let leak = XPLeakDetector(checkDelayMs: delayMs) { [weak self] event in
+                    guard let msg = try? XPMessage(type: .perfEvent, content: event) else { return }
+                    self?.cachedConnection?.send(message: msg)
+                }
+                leak.start()
+                self.leakDetector = leak
+            }
+        }
+
         #if DEBUG
         keychainCapture = XPKeychainCapture()
         #endif
@@ -176,16 +190,17 @@ public final class XpectorServer: @unchecked Sendable {
             notif: XPNotificationCapture?,
             perf: XPPerformanceCapture?,
             hang: XPHangDetector?,
+            leak: XPLeakDetector?,
             conn: XPServerConnection?
         ) = stateQueue.sync {
             guard isRunning else {
-                return (nil, nil, nil, nil, nil, nil, nil, nil, nil)
+                return (nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
             }
             isRunning = false
 
             let s = (logCapture, osLogCapture, userDefaultsMonitor, networkCapture,
                      navigationCapture, notificationCapture, performanceCapture,
-                     hangDetector, connection)
+                     hangDetector, leakDetector, connection)
 
             logCapture = nil
             osLogCapture = nil
@@ -195,6 +210,7 @@ public final class XpectorServer: @unchecked Sendable {
             notificationCapture = nil
             performanceCapture = nil
             hangDetector = nil
+            leakDetector = nil
             #if DEBUG
             keychainCapture = nil
             #endif
@@ -218,6 +234,7 @@ public final class XpectorServer: @unchecked Sendable {
         snapshot.notif?.stop()
         snapshot.perf?.stop()
         snapshot.hang?.stop()
+        snapshot.leak?.stop()
 
         logBufferLock.lock()
         logBuffer.removeAll()

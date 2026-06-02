@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import Foundation
 import XpectorServer
 
@@ -136,6 +137,17 @@ struct ContentView: View {
                     }
                 }
 
+                Section("Leak Simulator") {
+                    Button("Closure retain cycle") { presentLeak(.closure) }
+                    Button("Timer not invalidated") { presentLeak(.timer) }
+                    Button("Strong delegate cycle") { presentLeak(.delegate) }
+                    Button("NotificationCenter observer") { presentLeak(.notification) }
+                    Button("Clean VC (no leak — control)") { presentLeak(.none) }
+                    Text("Each presents a VC then auto-dismisses. Leaks fire a 🩸 alert in the Mac app ~2s after dismissal; the clean control stays silent.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Crashes") {
                     Button("Trigger NSException", role: .destructive) {
                         let array = NSArray()
@@ -225,4 +237,180 @@ struct ContentView: View {
             }
         }.resume()
     }
+}
+
+// MARK: - Leak Simulator
+
+/// Common iOS view-controller leak patterns, used to exercise XpectorServer's
+/// automatic VC deinit-leak detection. Each presents a modal that auto-dismisses;
+/// a leaking VC fails to deallocate and is reported, the clean control is not.
+enum LeakKind {
+    case none          // control: deallocates correctly
+    case closure       // stored closure strongly captures self
+    case timer         // repeating Timer whose block retains self, never invalidated
+    case delegate      // helper object holds a strong (non-weak) back-reference
+    case notification  // block observer never removed; the global center retains self
+
+    var title: String {
+        switch self {
+        case .none: return "Clean VC (no leak)"
+        case .closure: return "Closure retain cycle"
+        case .timer: return "Timer not invalidated"
+        case .delegate: return "Strong delegate cycle"
+        case .notification: return "NotificationCenter observer"
+        }
+    }
+    var subtitle: String {
+        switch self {
+        case .none: return "Deallocates correctly — no alert expected"
+        case .closure: return "self.handler = { self… }"
+        case .timer: return "Timer block retains self, never invalidated"
+        case .delegate: return "helper.owner = self (strong)"
+        case .notification: return "addObserver(forName:) capturing self, never removed"
+        }
+    }
+    var color: UIColor {
+        switch self {
+        case .none: return .systemGreen
+        case .closure: return .systemIndigo
+        case .timer: return .systemOrange
+        case .delegate: return .systemPurple
+        case .notification: return .systemTeal
+        }
+    }
+}
+
+private final class LeakHelper {
+    var owner: AnyObject?  // strong on purpose — creates the cycle
+}
+
+class SimulatedLeakViewController: UIViewController {
+    private let kind: LeakKind
+
+    // Leak anchors (deliberately strong where that creates a cycle).
+    private var handler: (() -> Void)?
+    private var timer: Timer?
+    private var helper: LeakHelper?
+    private var observerToken: NSObjectProtocol?
+
+    init(kind: LeakKind) {
+        self.kind = kind
+        super.init(nibName: nil, bundle: nil)
+    }
+    required init?(coder: NSCoder) { fatalError("not supported") }
+
+    deinit {
+        print("[LeakSim] \(kind.title): deallocated cleanly")
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = kind.color
+
+        let title = UILabel()
+        title.text = kind.title
+        title.font = .boldSystemFont(ofSize: 20)
+        title.textColor = .white
+        title.textAlignment = .center
+        title.numberOfLines = 0
+
+        let subtitle = UILabel()
+        subtitle.text = kind.subtitle
+        subtitle.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        subtitle.textColor = .white.withAlphaComponent(0.85)
+        subtitle.textAlignment = .center
+        subtitle.numberOfLines = 0
+
+        let closeButton = UIButton(type: .system)
+        closeButton.setTitle("Close", for: .normal)
+        closeButton.setTitleColor(.white, for: .normal)
+        closeButton.titleLabel?.font = .boldSystemFont(ofSize: 17)
+        closeButton.addTarget(self, action: #selector(close), for: .touchUpInside)
+
+        let stack = UIStackView(arrangedSubviews: [title, subtitle, closeButton])
+        stack.axis = .vertical
+        stack.spacing = 16
+        stack.alignment = .center
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -24),
+        ])
+
+        installLeak()
+
+        // Auto-dismiss so the leak check fires without manual interaction.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.dismiss(animated: true)
+        }
+    }
+
+    @objc private func close() { dismiss(animated: true) }
+
+    private func installLeak() {
+        switch kind {
+        case .none:
+            break
+        case .closure:
+            handler = { _ = self.view }                  // self → handler → self
+        case .timer:
+            timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+                _ = self.view                            // self → timer → block → self
+            }
+        case .delegate:
+            let h = LeakHelper()
+            h.owner = self                               // helper → self
+            helper = h                                   // self → helper
+        case .notification:
+            observerToken = NotificationCenter.default.addObserver(
+                forName: UIApplication.didBecomeActiveNotification, object: nil, queue: nil
+            ) { _ in _ = self.view }                     // global center → block → self (never removed)
+        }
+    }
+}
+
+// Distinct subclasses so each leak kind shows as its own row in the Mac Leaks tab.
+final class ClosureLeakViewController: SimulatedLeakViewController {
+    init() { super.init(kind: .closure) }
+    required init?(coder: NSCoder) { fatalError("not supported") }
+}
+final class TimerLeakViewController: SimulatedLeakViewController {
+    init() { super.init(kind: .timer) }
+    required init?(coder: NSCoder) { fatalError("not supported") }
+}
+final class DelegateLeakViewController: SimulatedLeakViewController {
+    init() { super.init(kind: .delegate) }
+    required init?(coder: NSCoder) { fatalError("not supported") }
+}
+final class NotificationLeakViewController: SimulatedLeakViewController {
+    init() { super.init(kind: .notification) }
+    required init?(coder: NSCoder) { fatalError("not supported") }
+}
+final class CleanViewController: SimulatedLeakViewController {
+    init() { super.init(kind: .none) }
+    required init?(coder: NSCoder) { fatalError("not supported") }
+}
+
+private func topViewController() -> UIViewController? {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    let window = scenes.flatMap { $0.windows }.first { $0.isKeyWindow } ?? scenes.first?.windows.first
+    var top = window?.rootViewController
+    while let presented = top?.presentedViewController { top = presented }
+    return top
+}
+
+func presentLeak(_ kind: LeakKind) {
+    let vc: SimulatedLeakViewController
+    switch kind {
+    case .none: vc = CleanViewController()
+    case .closure: vc = ClosureLeakViewController()
+    case .timer: vc = TimerLeakViewController()
+    case .delegate: vc = DelegateLeakViewController()
+    case .notification: vc = NotificationLeakViewController()
+    }
+    vc.modalPresentationStyle = .formSheet
+    topViewController()?.present(vc, animated: true)
 }
