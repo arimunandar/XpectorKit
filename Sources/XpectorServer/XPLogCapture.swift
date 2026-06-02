@@ -60,32 +60,44 @@ final class XPLogCapture: @unchecked Sendable {
         close(pipe[1])
 
         let readFD = pipe[0]
+        // Make the read end non-blocking so the drain loop never waits for more
+        // data once the pipe is empty.
+        let flags = fcntl(readFD, F_GETFL, 0)
+        _ = fcntl(readFD, F_SETFL, flags | O_NONBLOCK)
+
         let savedOriginalFD = originalFD
         let src = DispatchSource.makeReadSource(fileDescriptor: readFD, queue: DispatchQueue.global(qos: .utility))
 
-        // Line buffer to handle partial reads and split UTF-8
-        var lineBuffer = Data()
+        // Line parsing runs on its own serial queue so it never throttles the
+        // pipe drain below — otherwise a heavy-logging launch fills the 64 KB
+        // pipe and the producer (often the main thread) blocks on write().
+        let processQueue = DispatchQueue(label: "com.xpector.logcapture.\(source_type == .stderr ? "stderr" : "stdout")")
+        var lineBuffer = Data() // only ever touched on processQueue
 
         src.setEventHandler { [weak self] in
             guard let self else { return }
-            let bufferSize = 4096
+            let bufferSize = 65536
             let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
             defer { buffer.deallocate() }
 
-            let bytesRead = read(readFD, buffer, bufferSize)
-            if bytesRead > 0 {
-                let data = Data(bytes: buffer, count: bytesRead)
-
-                // Pass through to original fd
-                if savedOriginalFD >= 0 {
-                    data.withUnsafeBytes { rawBuffer in
-                        if let base = rawBuffer.baseAddress {
-                            Darwin.write(savedOriginalFD, base, bytesRead)
-                        }
+            // Drain the pipe completely and pass through, keeping this fast so
+            // the producer is never blocked waiting for buffer space.
+            var chunk = Data()
+            while true {
+                let n = read(readFD, buffer, bufferSize)
+                if n > 0 {
+                    if savedOriginalFD >= 0 {
+                        _ = Darwin.write(savedOriginalFD, buffer, n)
                     }
+                    chunk.append(buffer, count: n)
+                } else {
+                    break // EAGAIN (pipe drained) or EOF
                 }
+            }
+            if chunk.isEmpty { return }
 
-                lineBuffer.append(data)
+            processQueue.async {
+                lineBuffer.append(chunk)
 
                 // Process complete lines
                 while let newlineIndex = lineBuffer.firstIndex(of: UInt8(ascii: "\n")) {
@@ -102,7 +114,7 @@ final class XPLogCapture: @unchecked Sendable {
                     self.onEntry(entry)
                 }
 
-                // Flush if buffer gets too large (no newline for a long time)
+                // Flush if the buffer grows without a newline for a long time.
                 if lineBuffer.count > 8192 {
                     if let text = String(data: lineBuffer, encoding: .utf8) {
                         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
