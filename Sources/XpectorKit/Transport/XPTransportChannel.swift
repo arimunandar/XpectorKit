@@ -8,8 +8,12 @@ public enum XPTransportError: Error, Sendable {
     case decodingFailed
 }
 
+/// Opaque identifier for a connected peer, used to route responses back to the
+/// specific client that made a request (instead of broadcasting to all peers).
+public typealias XPPeerID = ObjectIdentifier
+
 public protocol XPTransportDelegate: AnyObject, Sendable {
-    func transport(_ transport: XPTransportChannel, didReceiveMessage message: XPMessage)
+    func transport(_ transport: XPTransportChannel, didReceiveMessage message: XPMessage, from peer: XPPeerID?)
     func transport(_ transport: XPTransportChannel, didChangeState connected: Bool)
     func transport(_ transport: XPTransportChannel, didFailWithError error: Error)
 }
@@ -18,11 +22,15 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
     public weak var delegate: XPTransportDelegate?
 
     private var channel: XP_PTChannel?
+    /// Client-side single peer (macOS connecting out).
     private var peerChannel: XP_PTChannel?
+    /// Server-side: multiple concurrent peers (Mac app + CLI + scan can all connect).
+    private var peerChannels: [XP_PTChannel] = []
     private let queue = DispatchQueue(label: "com.xpector.transport")
 
     public var isConnected: Bool {
-        peerChannel?.isConnected ?? false
+        if let peerChannel { return peerChannel.isConnected }
+        return peerChannels.contains { $0.isConnected }
     }
 
     public override init() {
@@ -78,22 +86,50 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
     // MARK: - Sending
 
     public func send(message: XPMessage) throws {
-        guard let target = peerChannel ?? channel, target.isConnected else {
+        let nsData = message.payload as NSData
+
+        // Client mode: single outbound peer.
+        if let target = peerChannel, target.isConnected {
+            let payload = nsData.createReferencingDispatchData()
+            target.sendFrame(ofType: message.type.rawValue, tag: 0, withPayload: payload, callback: nil)
+            return
+        }
+
+        // Server mode: broadcast to every connected peer (Mac app, CLI, etc.).
+        let connectedPeers = peerChannels.filter { $0.isConnected }
+        guard !connectedPeers.isEmpty else {
             throw XPTransportError.notConnected
         }
-        let nsData = message.payload as NSData
-        let payload = nsData.createReferencingDispatchData()
-        target.sendFrame(ofType: message.type.rawValue, tag: 0, withPayload: payload, callback: nil)
+        for peer in connectedPeers {
+            let payload = nsData.createReferencingDispatchData()
+            peer.sendFrame(ofType: message.type.rawValue, tag: 0, withPayload: payload, callback: nil)
+        }
+    }
+
+    /// Reply to a specific peer (the one that made a request). Falls back to
+    /// broadcast if the peer is unknown. Used for request/response so responses
+    /// don't cross-talk between concurrent clients.
+    public func reply(message: XPMessage, to peer: XPPeerID?) throws {
+        if let peer, let target = peerChannels.first(where: { ObjectIdentifier($0) == peer }) {
+            guard target.isConnected else { throw XPTransportError.notConnected }
+            let payload = (message.payload as NSData).createReferencingDispatchData()
+            target.sendFrame(ofType: message.type.rawValue, tag: 0, withPayload: payload, callback: nil)
+            return
+        }
+        try send(message: message)
     }
 
     // MARK: - Disconnect
 
     public func disconnect() {
         let peer = peerChannel
+        let peers = peerChannels
         let ch = channel
         peerChannel = nil
+        peerChannels = []
         channel = nil
         peer?.close()
+        peers.forEach { $0.close() }
         ch?.close()
     }
 }
@@ -114,22 +150,23 @@ extension XPTransportChannel: XP_PTChannelDelegate {
         }
 
         let message = XPMessage(type: messageType, payload: data)
-        delegate?.transport(self, didReceiveMessage: message)
+        delegate?.transport(self, didReceiveMessage: message, from: ObjectIdentifier(channel))
     }
 
     public func ioFrameChannel(_ channel: XP_PTChannel, didEndWithError error: (any Error)?) {
         if channel === peerChannel {
             peerChannel = nil
         }
+        peerChannels.removeAll { $0 === channel }
         delegate?.transport(self, didChangeState: false)
     }
 
     public func ioFrameChannel(_ channel: XP_PTChannel, didAcceptConnection otherChannel: XP_PTChannel, from address: XP_PTAddress) {
-        if peerChannel != nil {
-            peerChannel?.close()
-        }
-        peerChannel = otherChannel
-        peerChannel?.delegate = self
+        // Support multiple concurrent peers — do NOT close existing connections.
+        // This lets the Mac app, CLI, and transient scan handshakes coexist
+        // without kicking each other off.
+        otherChannel.delegate = self
+        peerChannels.append(otherChannel)
         delegate?.transport(self, didChangeState: true)
     }
 }

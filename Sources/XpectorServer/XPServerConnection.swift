@@ -33,11 +33,10 @@ final class XPServerConnection: @unchecked Sendable {
         }
     }
 
-    private func sendResponse<T: Encodable>(type: XPMessageType, content: T) {
-        guard transport.isConnected else { return }
+    private func sendResponse<T: Encodable>(type: XPMessageType, content: T, to peer: XPPeerID?) {
         do {
             let msg = try XPMessage(type: type, content: content)
-            try transport.send(message: msg)
+            try transport.reply(message: msg, to: peer)
         } catch {
             print("[Xpector] response encode/send failed: \(error.localizedDescription)")
         }
@@ -45,7 +44,7 @@ final class XPServerConnection: @unchecked Sendable {
 }
 
 extension XPServerConnection: XPTransportDelegate {
-    func transport(_ transport: XPTransportChannel, didReceiveMessage message: XPMessage) {
+    func transport(_ transport: XPTransportChannel, didReceiveMessage message: XPMessage, from peer: XPPeerID?) {
         switch message.type {
         case .ping:
             let info = XPAppInfo(
@@ -54,13 +53,13 @@ extension XPServerConnection: XPTransportDelegate {
                 deviceType: "iOS",
                 serverVersion: XPConstants.protocolVersion
             )
-            sendResponse(type: .pong, content: info)
+            sendResponse(type: .pong, content: info, to: peer)
 
         case .requestHierarchy:
             let request = (try? message.decode(XPHierarchyRequest.self)) ?? XPHierarchyRequest()
             DispatchQueue.main.async { [weak self] in
                 let snapshot = XPHierarchyCapture.capture(request: request)
-                self?.sendResponse(type: .hierarchyData, content: snapshot)
+                self?.sendResponse(type: .hierarchyData, content: snapshot, to: peer)
             }
 
         case .requestNodeDetail:
@@ -76,7 +75,7 @@ extension XPServerConnection: XPTransportDelegate {
                         groups: [],
                         groupScreenshot: nil
                     )
-                    self?.sendResponse(type: .nodeDetailData, content: fail)
+                    self?.sendResponse(type: .nodeDetailData, content: fail, to: peer)
                     return
                 }
                 let groups = XPAttributeBuilder.build(for: view)
@@ -87,7 +86,7 @@ extension XPServerConnection: XPTransportDelegate {
                     groups: groups,
                     groupScreenshot: groupScreenshot
                 )
-                self?.sendResponse(type: .nodeDetailData, content: response)
+                self?.sendResponse(type: .nodeDetailData, content: response, to: peer)
             }
 
         case .modifyAttribute:
@@ -98,18 +97,18 @@ extension XPServerConnection: XPTransportDelegate {
             DispatchQueue.main.async { [weak self] in
                 guard let view = XPHierarchyCapture.lookupView(modification.nodeID) else {
                     let fail = XPModificationResponse(success: false, error: "View not found in registry")
-                    self?.sendResponse(type: .modifyAttributeResponse, content: fail)
+                    self?.sendResponse(type: .modifyAttributeResponse, content: fail, to: peer)
                     return
                 }
                 let response = XPAttributeModifier.apply(modification, to: view)
-                self?.sendResponse(type: .modifyAttributeResponse, content: response)
+                self?.sendResponse(type: .modifyAttributeResponse, content: response, to: peer)
             }
 
         case .requestScreenshot:
             DispatchQueue.main.async { [weak self] in
                 if let data = XPHierarchyCapture.captureFullScreenshot() {
                     let response: [String: Data] = ["screenshot": data]
-                    self?.sendResponse(type: .screenshotData, content: response)
+                    self?.sendResponse(type: .screenshotData, content: response, to: peer)
                 }
             }
 
@@ -118,14 +117,14 @@ extension XPServerConnection: XPTransportDelegate {
         case .requestRecentNetwork:
             let request = (try? message.decode(XPRecentNetworkRequest.self)) ?? XPRecentNetworkRequest()
             let entries = XpectorServer.shared.getNetworkCapture()?.recentEntries(limit: request.limit, domainFilter: request.domainFilter) ?? []
-            sendResponse(type: .recentNetworkData, content: entries)
+            sendResponse(type: .recentNetworkData, content: entries, to: peer)
 
         // MARK: - Navigation
 
         case .requestNavState:
             DispatchQueue.main.async { [weak self] in
                 let state = XPNavigationCapture.captureCurrentState()
-                self?.sendResponse(type: .navStateData, content: state)
+                self?.sendResponse(type: .navStateData, content: state, to: peer)
             }
 
         // MARK: - Context
@@ -147,7 +146,7 @@ extension XPServerConnection: XPTransportDelegate {
                     keychainSummary: keychainSummary,
                     logEntries: server.getRecentLogEntries()
                 )
-                self?.sendResponse(type: .contextData, content: snapshot)
+                self?.sendResponse(type: .contextData, content: snapshot, to: peer)
             }
 
         // MARK: - Keychain
@@ -157,36 +156,36 @@ extension XPServerConnection: XPTransportDelegate {
             let request = (try? message.decode(XPKeychainRequest.self)) ?? XPKeychainRequest()
             let snapshot = XpectorServer.shared.getKeychainCapture()?.queryItems(request: request)
                 ?? XPKeychainSnapshot(items: [])
-            sendResponse(type: .keychainItemsData, content: snapshot)
+            sendResponse(type: .keychainItemsData, content: snapshot, to: peer)
 
         case .modifyKeychainItem:
             guard let modification = try? message.decode(XPKeychainModification.self) else {
-                sendResponse(type: .modifyKeychainResponse, content: XPKeychainModificationResponse(success: false, error: "failed to decode"))
+                sendResponse(type: .modifyKeychainResponse, content: XPKeychainModificationResponse(success: false, error: "failed to decode"), to: peer)
                 return
             }
             let response = XpectorServer.shared.getKeychainCapture()?.modifyItem(modification)
                 ?? XPKeychainModificationResponse(success: false, error: "keychain capture not available")
-            sendResponse(type: .modifyKeychainResponse, content: response)
+            sendResponse(type: .modifyKeychainResponse, content: response, to: peer)
         #endif
 
         // MARK: - Concurrency / Threads
 
         case .requestThreadSnapshot:
             let snapshot = XPConcurrencyCapture.captureSnapshot()
-            sendResponse(type: .threadSnapshotData, content: snapshot)
+            sendResponse(type: .threadSnapshotData, content: snapshot, to: peer)
 
         // MARK: - Observer Map (not implemented in v1)
 
         case .requestObserverMap:
             let emptyMap = XPObserverMap(entries: [])
-            sendResponse(type: .observerMapData, content: emptyMap)
+            sendResponse(type: .observerMapData, content: emptyMap, to: peer)
 
         // MARK: - Performance Summary
 
         case .requestPerfSummary:
             let summary = XpectorServer.shared.getPerformanceCapture()?.currentSummary()
                 ?? XPPerfSummary(currentFPS: 0, avgFPS: 0, memoryUsageMB: 0, peakMemoryMB: 0, recentHangCount: 0, droppedFrames: 0, uptimeSeconds: 0)
-            sendResponse(type: .perfSummaryData, content: summary)
+            sendResponse(type: .perfSummaryData, content: summary, to: peer)
 
         default:
             break

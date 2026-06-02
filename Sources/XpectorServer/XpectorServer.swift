@@ -25,6 +25,9 @@ public final class XpectorServer: @unchecked Sendable {
     private var cachedConnection: XPServerConnection?
     private var cachedLogBufferSize: Int = 100
 
+    private let firstPeerLock = NSLock()
+    private var didSendWelcome = false
+
     private let logBufferLock = NSLock()
     private var logBuffer: [XPLogEntry] = []
 
@@ -47,13 +50,28 @@ public final class XpectorServer: @unchecked Sendable {
 
         let selectedPort = config.port
 
+        firstPeerLock.lock()
+        didSendWelcome = false
+        firstPeerLock.unlock()
+
         let conn = XPServerConnection(port: selectedPort)
         conn.onConnected = { [weak self] in
-            self?.sendAppInfo()
+            guard let self else { return }
+            // Multiple peers (Mac app, CLI, transient scans) connect over the
+            // lifetime of the server. The welcome log + pending crash are
+            // one-time concerns — only emit them on the first peer to avoid
+            // re-broadcasting a "connected" log on every scan handshake.
+            self.firstPeerLock.lock()
+            let isFirst = !self.didSendWelcome
+            self.didSendWelcome = true
+            self.firstPeerLock.unlock()
+            guard isFirst else { return }
+
+            self.sendAppInfo()
             let welcome = XPLogEntry(message: "XpectorServer connected — log streaming active", source: .stdout, category: .info)
-            self?.send(entry: welcome)
+            self.send(entry: welcome)
             if let pendingCrash = XPCrashCapture.checkPendingCrashLog() {
-                self?.send(entry: pendingCrash, type: .crash)
+                self.send(entry: pendingCrash, type: .crash)
             }
         }
         conn.start()
