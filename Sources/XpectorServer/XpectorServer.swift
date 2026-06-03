@@ -1,5 +1,6 @@
 import Foundation
 import OSLog
+import UIKit
 import XpectorKit
 
 public final class XpectorServer: @unchecked Sendable {
@@ -33,6 +34,7 @@ public final class XpectorServer: @unchecked Sendable {
 
     private let logBufferLock = NSLock()
     private var logBuffer: [XPLogEntry] = []
+    private var foregroundObserver: NSObjectProtocol?
 
     private init() {}
 
@@ -85,6 +87,14 @@ public final class XpectorServer: @unchecked Sendable {
         let publisher = XPBonjourPublisher(port: selectedPort)
         publisher.start()
         bonjourPublisher = publisher
+
+        foregroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.restartConnection()
+        }
 
         logCapture = XPLogCapture { [weak self] entry in
             self?.send(entry: entry)
@@ -213,6 +223,10 @@ public final class XpectorServer: @unchecked Sendable {
             userDefaultsCapture = nil
             bonjourPublisher?.stop()
             bonjourPublisher = nil
+            if let obs = foregroundObserver {
+                NotificationCenter.default.removeObserver(obs)
+            }
+            foregroundObserver = nil
             networkCapture = nil
             navigationCapture = nil
             notificationCapture = nil
@@ -249,6 +263,17 @@ public final class XpectorServer: @unchecked Sendable {
         logBufferLock.unlock()
 
         snapshot.conn?.stop()
+    }
+
+    private func restartConnection() {
+        guard isRunning, let conn = connection else { return }
+        firstPeerLock.lock()
+        didSendWelcome = false
+        firstPeerLock.unlock()
+        conn.stop()
+        conn.start()
+        bonjourPublisher?.stop()
+        bonjourPublisher?.start()
     }
 
     func sendDirect(message: XPMessage) {
