@@ -6,6 +6,7 @@ final class XPURLProtocolInterceptor: URLProtocol, @unchecked Sendable {
 
     private var dataTask: URLSessionDataTask?
     private var responseData = Data()
+    private var capturedRequestBody: Data?
     private var startTime: CFAbsoluteTime = 0
     private var capturedResponse: HTTPURLResponse?
 
@@ -75,6 +76,19 @@ final class XPURLProtocolInterceptor: URLProtocol, @unchecked Sendable {
 
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
+    private static func readStream(_ stream: InputStream) -> Data {
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 4096)
+        defer { buffer.deallocate() }
+        while stream.hasBytesAvailable {
+            let n = stream.read(buffer, maxLength: 4096)
+            if n > 0 { data.append(buffer, count: n) } else { break }
+        }
+        return data
+    }
+
     override func startLoading() {
         startTime = CFAbsoluteTimeGetCurrent()
         responseData = Data()
@@ -84,6 +98,16 @@ final class XPURLProtocolInterceptor: URLProtocol, @unchecked Sendable {
             return
         }
         URLProtocol.setProperty(true, forKey: Self.handledKey, in: mutable)
+
+        // Capture body from httpBody or httpBodyStream (Alamofire uses the stream)
+        if let body = mutable.httpBody {
+            capturedRequestBody = body
+        } else if let stream = mutable.httpBodyStream {
+            let body = Self.readStream(stream)
+            capturedRequestBody = body
+            mutable.httpBodyStream = nil
+            mutable.httpBody = body
+        }
 
         dataTask = Self.forwardingSession.dataTask(with: mutable as URLRequest) { [weak self] data, response, error in
             guard let self else { return }
@@ -117,7 +141,7 @@ final class XPURLProtocolInterceptor: URLProtocol, @unchecked Sendable {
         let requestHeaders = request.allHTTPHeaderFields ?? [:]
 
         var requestBodyPreview: String?
-        if let body = request.httpBody, body.count > 0 {
+        if let body = capturedRequestBody ?? request.httpBody, body.count > 0 {
             requestBodyPreview = String(data: body.prefix(65536), encoding: .utf8)
         }
 
