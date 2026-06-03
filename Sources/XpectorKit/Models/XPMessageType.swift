@@ -35,4 +35,6 @@ public enum XPMessageType: UInt32, Codable, Sendable {
     case perfEvent = 580
     case requestPerfSummary = 581
     case perfSummaryData = 582
+    case requestUserDefaults = 590
+    case userDefaultsSnapshotData = 591
 }

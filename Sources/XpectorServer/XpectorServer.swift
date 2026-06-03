@@ -16,6 +16,7 @@ public final class XpectorServer: @unchecked Sendable {
     private var performanceCapture: XPPerformanceCapture?
     private var hangDetector: XPHangDetector?
     private var leakDetector: XPLeakDetector?
+    private var userDefaultsCapture: XPUserDefaultsCapture?
     #if DEBUG
     private var keychainCapture: XPKeychainCapture?
     #endif
@@ -171,6 +172,8 @@ public final class XpectorServer: @unchecked Sendable {
             }
         }
 
+        userDefaultsCapture = XPUserDefaultsCapture()
+
         #if DEBUG
         keychainCapture = XPKeychainCapture()
         #endif
@@ -202,6 +205,7 @@ public final class XpectorServer: @unchecked Sendable {
             logCapture = nil
             osLogCapture = nil
             userDefaultsMonitor = nil
+            userDefaultsCapture = nil
             networkCapture = nil
             navigationCapture = nil
             notificationCapture = nil
@@ -260,6 +264,7 @@ public final class XpectorServer: @unchecked Sendable {
 
     func getNetworkCapture() -> XPNetworkCapture? { networkCapture }
     func getPerformanceCapture() -> XPPerformanceCapture? { performanceCapture }
+    func getUserDefaultsCapture() -> XPUserDefaultsCapture? { userDefaultsCapture }
 
     #if DEBUG
     func getKeychainCapture() -> XPKeychainCapture? { keychainCapture }

@@ -168,6 +168,13 @@ extension XPServerConnection: XPTransportDelegate {
             sendResponse(type: .modifyKeychainResponse, content: response, to: peer)
         #endif
 
+        // MARK: - UserDefaults Snapshot
+
+        case .requestUserDefaults:
+            let snapshot = XpectorServer.shared.getUserDefaultsCapture()?.captureSnapshot()
+                ?? XPUserDefaultsSnapshot(entries: [])
+            sendResponse(type: .userDefaultsSnapshotData, content: snapshot, to: peer)
+
         // MARK: - Concurrency / Threads
 
         case .requestThreadSnapshot:
