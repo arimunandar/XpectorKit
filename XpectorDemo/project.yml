@@ -21,6 +21,11 @@ targets:
         product: XpectorServer
       - package: XpectorKit
         product: XpectorKit
+    info:
+      properties:
+        NSLocalNetworkUsageDescription: "Xpector uses the local network to connect to the Mac debugging tool."
+        NSBonjourServices:
+          - "_xpector._tcp"
     settings:
       base:
         INFOPLIST_GENERATION: YES

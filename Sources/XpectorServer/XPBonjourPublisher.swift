@@ -34,6 +34,10 @@ final class XPBonjourPublisher: NSObject, @unchecked Sendable {
 }
 
 extension XPBonjourPublisher: NetServiceDelegate {
-    func netServiceDidPublish(_ sender: NetService) {}
-    func netService(_ sender: NetService, didNotPublish errorDict: [String: NSNumber]) {}
+    func netServiceDidPublish(_ sender: NetService) {
+        print("[Xpector] Bonjour service published: \(sender.name) on port \(sender.port)")
+    }
+    func netService(_ sender: NetService, didNotPublish errorDict: [String: NSNumber]) {
+        print("[Xpector] Bonjour publish failed: \(errorDict)")
+    }
 }
