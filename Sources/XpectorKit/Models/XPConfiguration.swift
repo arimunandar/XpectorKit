@@ -17,7 +17,7 @@ public struct XPConfiguration: Sendable {
     public init(
         port: UInt16 = 47164,
         enableNetworkCapture: Bool = true,
-        enableAutomaticNetworkInterception: Bool = false,
+        enableAutomaticNetworkInterception: Bool = true,
         enableNavigationCapture: Bool = true,
         enablePerformanceCapture: Bool = true,
         enableNotificationCapture: Bool = false,

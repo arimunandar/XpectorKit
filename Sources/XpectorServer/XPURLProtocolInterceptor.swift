@@ -1,13 +1,6 @@
 import Foundation
 import XpectorKit
 
-/// A URLProtocol subclass that captures HTTP/HTTPS traffic automatically when
-/// registered via URLProtocol.registerClass(). This intercepts URLSession.shared
-/// and sessions created from URLSessionConfiguration.default.
-///
-/// Opt-in only (XPConfiguration.enableAutomaticNetworkInterception). It does NOT
-/// swizzle URLSessionConfiguration — that approach breaks SwiftUI. registerClass
-/// is the safe, documented mechanism.
 final class XPURLProtocolInterceptor: URLProtocol, @unchecked Sendable {
     private static let handledKey = "com.xpector.urlprotocol.handled"
 
@@ -16,14 +9,65 @@ final class XPURLProtocolInterceptor: URLProtocol, @unchecked Sendable {
     private var startTime: CFAbsoluteTime = 0
     private var capturedResponse: HTTPURLResponse?
 
-    // A session WITHOUT our protocol, to actually perform the request (avoids recursion)
     private static let forwardingSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         return URLSession(configuration: config)
     }()
 
+    // MARK: - Swizzle URLSessionConfiguration to inject into ALL sessions
+
+    private static var hasSwizzled = false
+
+    static func installSessionConfigSwizzle() {
+        guard !hasSwizzled else { return }
+        hasSwizzled = true
+
+        guard let defaultGetter = class_getClassMethod(
+            URLSessionConfiguration.self,
+            #selector(getter: URLSessionConfiguration.default)
+        ) else { return }
+
+        guard let ephemeralGetter = class_getClassMethod(
+            URLSessionConfiguration.self,
+            #selector(getter: URLSessionConfiguration.ephemeral)
+        ) else { return }
+
+        let origDefault = method_getImplementation(defaultGetter)
+        let origEphemeral = method_getImplementation(ephemeralGetter)
+
+        typealias ConfigGetter = @convention(c) (AnyObject, Selector) -> URLSessionConfiguration
+
+        let swizzledDefault: @convention(block) (AnyObject) -> URLSessionConfiguration = { obj in
+            let config = unsafeBitCast(origDefault, to: ConfigGetter.self)(
+                obj, #selector(getter: URLSessionConfiguration.default)
+            )
+            XPURLProtocolInterceptor.inject(into: config)
+            return config
+        }
+
+        let swizzledEphemeral: @convention(block) (AnyObject) -> URLSessionConfiguration = { obj in
+            let config = unsafeBitCast(origEphemeral, to: ConfigGetter.self)(
+                obj, #selector(getter: URLSessionConfiguration.ephemeral)
+            )
+            XPURLProtocolInterceptor.inject(into: config)
+            return config
+        }
+
+        method_setImplementation(defaultGetter, imp_implementationWithBlock(swizzledDefault))
+        method_setImplementation(ephemeralGetter, imp_implementationWithBlock(swizzledEphemeral))
+    }
+
+    private static func inject(into config: URLSessionConfiguration) {
+        var protocols = config.protocolClasses ?? []
+        if !protocols.contains(where: { $0 == XPURLProtocolInterceptor.self }) {
+            protocols.insert(XPURLProtocolInterceptor.self, at: 0)
+            config.protocolClasses = protocols
+        }
+    }
+
+    // MARK: - URLProtocol
+
     override class func canInit(with request: URLRequest) -> Bool {
-        // Skip if already handled (prevents recursion)
         if URLProtocol.property(forKey: handledKey, in: request) != nil { return false }
         guard let scheme = request.url?.scheme?.lowercased() else { return false }
         return scheme == "http" || scheme == "https"

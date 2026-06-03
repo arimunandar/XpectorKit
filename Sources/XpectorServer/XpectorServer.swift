@@ -109,12 +109,9 @@ public final class XpectorServer: @unchecked Sendable {
             network.start()
             networkCapture = network
 
-            // Opt-in: automatic HTTP/HTTPS interception via URLProtocol.registerClass.
-            // This intercepts URLSession.shared and sessions built from .default config
-            // WITHOUT swizzling URLSessionConfiguration (which breaks SwiftUI).
-            // Requires enableNetworkCapture (above) so the shared capture is started.
             if config.enableAutomaticNetworkInterception {
                 URLProtocol.registerClass(XPURLProtocolInterceptor.self)
+                XPURLProtocolInterceptor.installSessionConfigSwizzle()
             }
         }
 
