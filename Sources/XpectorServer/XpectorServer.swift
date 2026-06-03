@@ -17,6 +17,7 @@ public final class XpectorServer: @unchecked Sendable {
     private var hangDetector: XPHangDetector?
     private var leakDetector: XPLeakDetector?
     private var userDefaultsCapture: XPUserDefaultsCapture?
+    private var bonjourPublisher: XPBonjourPublisher?
     #if DEBUG
     private var keychainCapture: XPKeychainCapture?
     #endif
@@ -80,6 +81,10 @@ public final class XpectorServer: @unchecked Sendable {
         connection = conn
         cachedConnection = conn
         cachedLogBufferSize = config.logBufferSize
+
+        let publisher = XPBonjourPublisher(port: selectedPort)
+        publisher.start()
+        bonjourPublisher = publisher
 
         logCapture = XPLogCapture { [weak self] entry in
             self?.send(entry: entry)
@@ -206,6 +211,8 @@ public final class XpectorServer: @unchecked Sendable {
             osLogCapture = nil
             userDefaultsMonitor = nil
             userDefaultsCapture = nil
+            bonjourPublisher?.stop()
+            bonjourPublisher = nil
             networkCapture = nil
             navigationCapture = nil
             notificationCapture = nil

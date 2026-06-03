@@ -74,7 +74,7 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
     public func listen(onPort port: UInt16) {
         let proto = XP_PTProtocol(dispatchQueue: queue)!
         guard let ch = XP_PTChannel(with: proto, delegate: self) else { return }
-        ch.listen(onPort: port, iPv4Address: INADDR_LOOPBACK) { [weak self] (error: (any Error)?) in
+        ch.listen(onPort: port, iPv4Address: INADDR_ANY) { [weak self] (error: (any Error)?) in
             guard let self else { return }
             if let error {
                 self.delegate?.transport(self, didFailWithError: error)
