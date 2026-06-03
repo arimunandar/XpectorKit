@@ -12,16 +12,19 @@ final class XPBonjourPublisher: NSObject, @unchecked Sendable {
     }
 
     func start() {
-        let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Xpector"
-        let service = NetService(
-            domain: "",
-            type: "_xpector._tcp.",
-            name: "\(appName) (\(bundleID))",
-            port: Int32(port)
-        )
-        service.delegate = self
-        service.publish()
-        netService = service
+        DispatchQueue.main.async { [self] in
+            let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Xpector"
+            let service = NetService(
+                domain: "",
+                type: "_xpector._tcp.",
+                name: "\(appName) (\(bundleID))",
+                port: Int32(port)
+            )
+            service.delegate = self
+            service.schedule(in: .main, forMode: .common)
+            service.publish()
+            netService = service
+        }
     }
 
     func stop() {
