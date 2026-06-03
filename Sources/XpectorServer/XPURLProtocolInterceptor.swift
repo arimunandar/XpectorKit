@@ -118,7 +118,7 @@ final class XPURLProtocolInterceptor: URLProtocol, @unchecked Sendable {
 
         var requestBodyPreview: String?
         if let body = request.httpBody, body.count > 0 {
-            requestBodyPreview = String(data: body.prefix(4096), encoding: .utf8)
+            requestBodyPreview = String(data: body.prefix(65536), encoding: .utf8)
         }
 
         let responseHeaders: [String: String]
@@ -133,7 +133,7 @@ final class XPURLProtocolInterceptor: URLProtocol, @unchecked Sendable {
             let contentType = responseHeaders.first { $0.key.lowercased() == "content-type" }?.value.lowercased() ?? ""
             let isText = contentType.contains("json") || contentType.contains("text") || contentType.contains("xml") || contentType.contains("html")
             if isText {
-                responseBodyPreview = String(data: responseData.prefix(8192), encoding: .utf8)
+                responseBodyPreview = String(data: responseData.prefix(262144), encoding: .utf8)
             } else {
                 responseBodyPreview = "<binary \(responseData.count) bytes, \(contentType)>"
             }
