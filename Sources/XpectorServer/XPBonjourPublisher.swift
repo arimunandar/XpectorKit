@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 final class XPBonjourPublisher: NSObject, @unchecked Sendable {
     private var netService: NetService?
@@ -14,10 +15,11 @@ final class XPBonjourPublisher: NSObject, @unchecked Sendable {
     func start() {
         DispatchQueue.main.async { [self] in
             let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Xpector"
+            let deviceName = UIDevice.current.name
             let service = NetService(
                 domain: "",
                 type: "_xpector._tcp.",
-                name: "\(appName) (\(bundleID))",
+                name: "\(appName) (\(bundleID)) - \(deviceName)",
                 port: Int32(port)
             )
             service.delegate = self

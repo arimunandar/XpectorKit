@@ -83,6 +83,51 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
         channel = ch
     }
 
+    @discardableResult
+    public func listenOnAvailablePort(preferred: UInt16, range: ClosedRange<UInt16>) -> UInt16 {
+        let ports = [preferred] + range.filter { $0 != preferred }
+        #if targetEnvironment(simulator)
+        let checkLoopback = true
+        #else
+        let checkLoopback = false
+        #endif
+        for port in ports {
+            if checkLoopback && Self.isLoopbackPortTaken(port) { continue }
+            let proto = XP_PTProtocol(dispatchQueue: queue)!
+            guard let ch = XP_PTChannel(with: proto, delegate: self) else { continue }
+            var bindError: Error?
+            ch.listen(onPort: port, iPv4Address: INADDR_ANY) { error in
+                bindError = error
+            }
+            if bindError == nil {
+                channel = ch
+                return port
+            }
+        }
+        delegate?.transport(self, didFailWithError: NSError(domain: "XPTransport", code: -1, userInfo: [NSLocalizedDescriptionKey: "No available port in range \(range)"]))
+        return 0
+    }
+
+    private static func isLoopbackPortTaken(_ port: UInt16) -> Bool {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(port).bigEndian
+        addr.sin_addr.s_addr = INADDR_LOOPBACK.bigEndian
+
+        let result = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        // bind returns 0 on success (port free), -1 on failure (port taken)
+        return result != 0
+    }
+
+
     // MARK: - Sending
 
     public func send(message: XPMessage) throws {

@@ -16,6 +16,17 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section("Navigation Demo") {
+                    NavigationLink("Push Detail Screen") {
+                        DetailDemoView(depth: 1)
+                    }
+                    Button("Present Modal") {
+                        let vc = ModalDemoViewController()
+                        vc.modalPresentationStyle = .formSheet
+                        topViewController()?.present(vc, animated: true)
+                    }
+                }
+
                 Section("Network (monitored)") {
                     Button("Fire all sample requests") {
                         fetchURL("https://httpbin.org/get")
@@ -400,6 +411,56 @@ private func topViewController() -> UIViewController? {
     var top = window?.rootViewController
     while let presented = top?.presentedViewController { top = presented }
     return top
+}
+
+struct DetailDemoView: View {
+    let depth: Int
+
+    var body: some View {
+        List {
+            Section("Info") {
+                Text("This is detail screen at depth \(depth)")
+            }
+            Section("Navigate deeper") {
+                NavigationLink("Push another level") {
+                    DetailDemoView(depth: depth + 1)
+                }
+            }
+        }
+        .navigationTitle("Detail \(depth)")
+    }
+}
+
+class ModalDemoViewController: UIViewController {
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .systemBlue
+
+        let label = UILabel()
+        label.text = "Modal Demo"
+        label.font = .boldSystemFont(ofSize: 24)
+        label.textColor = .white
+        label.textAlignment = .center
+
+        let closeButton = UIButton(type: .system)
+        closeButton.setTitle("Dismiss", for: .normal)
+        closeButton.setTitleColor(.white, for: .normal)
+        closeButton.titleLabel?.font = .boldSystemFont(ofSize: 17)
+        closeButton.addTarget(self, action: #selector(close), for: .touchUpInside)
+
+        let stack = UIStackView(arrangedSubviews: [label, closeButton])
+        stack.axis = .vertical
+        stack.spacing = 20
+        stack.alignment = .center
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+        ])
+    }
+
+    @objc private func close() { dismiss(animated: true) }
 }
 
 func presentLeak(_ kind: LeakKind) {

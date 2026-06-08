@@ -18,6 +18,9 @@ final class XPNavigationCapture: @unchecked Sendable {
     private static var originalViewDidAppear: IMP?
     private static var originalDismiss: IMP?
 
+    // Track nav stack depth per UINavigationController to distinguish push vs pop
+    private static var navStackDepths: [ObjectIdentifier: Int] = [:]
+
     init(onEvent: @escaping (XPNavEvent) -> Void) {
         self.onEvent = onEvent
     }
@@ -35,6 +38,7 @@ final class XPNavigationCapture: @unchecked Sendable {
         guard isCapturing else { return }
         isCapturing = false
         XPNavigationCapture.activeInstance = nil
+        XPNavigationCapture.navStackDepths.removeAll()
     }
 
     // MARK: - On-Demand State Capture
@@ -157,8 +161,13 @@ final class XPNavigationCapture: @unchecked Sendable {
                 )
                 original(vc, #selector(UIViewController.viewDidAppear(_:)), animated)
 
-                // Post nav event
-                XPNavigationCapture.handleViewDidAppear(vc)
+                // Capture transient state synchronously (isBeingPresented resets after this call)
+                let context = AppearContext(vc: vc)
+
+                // Defer event emission so SwiftUI has time to set navigationTitle
+                DispatchQueue.main.async {
+                    XPNavigationCapture.handleViewDidAppear(vc, context: context)
+                }
             }
             let swizzledIMP = imp_implementationWithBlock(swizzledBlock)
             method_setImplementation(originalMethod, swizzledIMP)
@@ -170,19 +179,15 @@ final class XPNavigationCapture: @unchecked Sendable {
             XPNavigationCapture.originalDismiss = method_getImplementation(originalMethod)
 
             let swizzledBlock: @convention(block) (UIViewController, Bool, (() -> Void)?) -> Void = { vc, animated, completion in
-                let dismissedClassName = String(describing: type(of: vc))
-
                 // Determine the presenting VC name before dismiss happens
                 let fromVC: String?
                 if let presented = vc.presentedViewController {
-                    // vc is the presenter, presented is being dismissed
-                    fromVC = String(describing: type(of: presented))
+                    fromVC = XPNavigationCapture.vcDisplayName(presented)
                 } else {
-                    // vc itself is being dismissed
-                    fromVC = dismissedClassName
+                    fromVC = XPNavigationCapture.vcDisplayName(vc)
                 }
 
-                let toVC = vc.presentingViewController.map { String(describing: type(of: $0)) }
+                let toVC = vc.presentingViewController.map { XPNavigationCapture.vcDisplayName($0) }
 
                 // Call original
                 let original = unsafeBitCast(
@@ -205,34 +210,72 @@ final class XPNavigationCapture: @unchecked Sendable {
         }
     }
 
+    // MARK: - Appear Context (captured synchronously in viewDidAppear)
+
+    private struct AppearContext {
+        let isBeingPresented: Bool
+        let presentingVC: UIViewController?
+        let navController: UINavigationController?
+        let navStackCount: Int
+        let previousStackVC: UIViewController?
+        let isTabRelated: Bool
+
+        init(vc: UIViewController) {
+            self.isBeingPresented = vc.isBeingPresented
+            self.presentingVC = vc.presentingViewController
+            self.navController = vc.navigationController
+            let stack = vc.navigationController?.viewControllers ?? []
+            self.navStackCount = stack.count
+            self.previousStackVC = stack.count > 1 && stack.last === vc ? stack[stack.count - 2] : nil
+            self.isTabRelated = vc is UITabBarController || vc.tabBarController != nil
+        }
+    }
+
+    // MARK: - Helpers
+
+    private static func vcDisplayName(_ vc: UIViewController) -> String {
+        let className = String(describing: type(of: vc))
+        if let title = vc.title, !title.isEmpty {
+            return "\(className) (\(title))"
+        }
+        if let title = vc.navigationItem.title, !title.isEmpty {
+            return "\(className) (\(title))"
+        }
+        return className
+    }
+
     // MARK: - Event Handlers
 
-    private static func handleViewDidAppear(_ vc: UIViewController) {
+    private static func handleViewDidAppear(_ vc: UIViewController, context: AppearContext) {
         guard let instance = activeInstance else { return }
 
-        let vcName = String(describing: type(of: vc))
+        let vcName = vcDisplayName(vc)
 
-        // Determine event type based on how the VC appeared
-        if vc.isBeingPresented {
-            let fromVC = vc.presentingViewController.map { String(describing: type(of: $0)) }
+        if context.isBeingPresented {
+            let fromVC = context.presentingVC.map { vcDisplayName($0) }
             let event = XPNavEvent(type: .present, fromVC: fromVC, toVC: vcName)
             instance.onEvent(event)
-        } else if let nav = vc.navigationController {
-            let stack = nav.viewControllers
-            if stack.last === vc && stack.count > 1 {
-                let previousVC = String(describing: type(of: stack[stack.count - 2]))
+        } else if let nav = context.navController {
+            let navId = ObjectIdentifier(nav)
+            let previousDepth = navStackDepths[navId] ?? 0
+            let currentDepth = context.navStackCount
+            navStackDepths[navId] = currentDepth
+
+            if currentDepth > previousDepth && currentDepth > 1 {
+                let previousVC = context.previousStackVC.map { vcDisplayName($0) }
                 let event = XPNavEvent(type: .push, fromVC: previousVC, toVC: vcName)
                 instance.onEvent(event)
-            } else if stack.count == 1 {
-                // Root of a navigation controller appeared (could be a pop-to-root or initial)
+            } else if currentDepth < previousDepth {
                 let event = XPNavEvent(type: .pop, fromVC: nil, toVC: vcName)
                 instance.onEvent(event)
+            } else if currentDepth == 1 && previousDepth == 0 {
+                let event = XPNavEvent(type: .push, fromVC: nil, toVC: vcName)
+                instance.onEvent(event)
             }
-        } else if vc is UITabBarController || vc.tabBarController != nil {
+        } else if context.isTabRelated {
             let event = XPNavEvent(type: .tabSwitch, fromVC: nil, toVC: vcName)
             instance.onEvent(event)
         } else {
-            // Generic appear: could be initial load, pop, or other
             let event = XPNavEvent(type: .push, fromVC: nil, toVC: vcName)
             instance.onEvent(event)
         }

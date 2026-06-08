@@ -36,7 +36,8 @@ class UIKitDemoViewController: UITableViewController {
     // MARK: - Sections
 
     enum Section: Int, CaseIterable {
-        case labels = 0
+        case navigation = 0
+        case labels
         case buttons
         case controls
         case inputs
@@ -49,6 +50,7 @@ class UIKitDemoViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
         switch Section(rawValue: section) {
+        case .navigation: return "Navigation"
         case .labels: return "Labels"
         case .buttons: return "Buttons"
         case .controls: return "Controls"
@@ -60,6 +62,7 @@ class UIKitDemoViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         switch Section(rawValue: section) {
+        case .navigation: return 2
         case .labels: return 3
         case .buttons: return 3
         case .controls: return 3
@@ -77,6 +80,23 @@ class UIKitDemoViewController: UITableViewController {
         var config = cell.defaultContentConfiguration()
 
         switch Section(rawValue: indexPath.section) {
+        case .navigation:
+            cell.selectionStyle = .default
+            cell.accessoryType = indexPath.row == 0 ? .disclosureIndicator : .none
+            switch indexPath.row {
+            case 0:
+                config.text = "Push Detail Screen"
+                config.image = UIImage(systemName: "arrow.right")
+                config.imageProperties.tintColor = .systemGreen
+                cell.accessibilityIdentifier = "nav_push"
+            case 1:
+                config.text = "Present Modal"
+                config.image = UIImage(systemName: "rectangle.portrait.on.rectangle.portrait")
+                config.imageProperties.tintColor = .systemBlue
+                cell.accessibilityIdentifier = "nav_present"
+            default: break
+            }
+
         case .labels:
             switch indexPath.row {
             case 0:
@@ -188,8 +208,108 @@ class UIKitDemoViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        if Section(rawValue: indexPath.section) == .buttons {
+        switch Section(rawValue: indexPath.section) {
+        case .navigation:
+            if indexPath.row == 0 {
+                let detail = UIKitDetailViewController(depth: 1)
+                navigationController?.pushViewController(detail, animated: true)
+            } else {
+                let modal = UIKitModalViewController()
+                modal.modalPresentationStyle = .formSheet
+                present(modal, animated: true)
+            }
+        case .buttons:
             print("[UIKit] Tapped button row \(indexPath.row)")
+        default:
+            break
         }
     }
+}
+
+// MARK: - UIKit Detail (pushable)
+
+class UIKitDetailViewController: UITableViewController {
+    private let depth: Int
+
+    init(depth: Int) {
+        self.depth = depth
+        super.init(style: .insetGrouped)
+        title = "UIKit Detail \(depth)"
+    }
+
+    required init?(coder: NSCoder) { fatalError("not supported") }
+
+    override func numberOfSections(in tableView: UITableView) -> Int { 2 }
+
+    override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
+        section == 0 ? "Info" : "Navigate"
+    }
+
+    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        section == 0 ? 1 : 2
+    }
+
+    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let cell = UITableViewCell(style: .subtitle, reuseIdentifier: nil)
+        if indexPath.section == 0 {
+            cell.textLabel?.text = "Detail screen at depth \(depth)"
+            cell.selectionStyle = .none
+        } else if indexPath.row == 0 {
+            cell.textLabel?.text = "Push another level"
+            cell.accessoryType = .disclosureIndicator
+        } else {
+            cell.textLabel?.text = "Present modal from here"
+            cell.textLabel?.textColor = .systemBlue
+        }
+        return cell
+    }
+
+    override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        tableView.deselectRow(at: indexPath, animated: true)
+        if indexPath.section == 1 {
+            if indexPath.row == 0 {
+                let next = UIKitDetailViewController(depth: depth + 1)
+                navigationController?.pushViewController(next, animated: true)
+            } else {
+                let modal = UIKitModalViewController()
+                modal.modalPresentationStyle = .formSheet
+                present(modal, animated: true)
+            }
+        }
+    }
+}
+
+// MARK: - UIKit Modal (presentable)
+
+class UIKitModalViewController: UIViewController {
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        title = "UIKit Modal"
+        view.backgroundColor = .systemIndigo
+
+        let label = UILabel()
+        label.text = "UIKit Modal"
+        label.font = .boldSystemFont(ofSize: 24)
+        label.textColor = .white
+        label.textAlignment = .center
+
+        let closeButton = UIButton(type: .system)
+        closeButton.setTitle("Dismiss", for: .normal)
+        closeButton.setTitleColor(.white, for: .normal)
+        closeButton.titleLabel?.font = .boldSystemFont(ofSize: 17)
+        closeButton.addTarget(self, action: #selector(close), for: .touchUpInside)
+
+        let stack = UIStackView(arrangedSubviews: [label, closeButton])
+        stack.axis = .vertical
+        stack.spacing = 20
+        stack.alignment = .center
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+        ])
+    }
+
+    @objc private func close() { dismiss(animated: true) }
 }

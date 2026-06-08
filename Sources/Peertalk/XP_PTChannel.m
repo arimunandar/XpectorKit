@@ -333,7 +333,6 @@ static const uint8_t kUserInfoKey;
   socklen_t socklen = sizeof(addr);
 
   int on = 1;
-
   if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) == -1) {
     close(fd);
     if (callback) callback([NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil]);

@@ -1,22 +1,35 @@
 import Foundation
+import UIKit
 import XpectorKit
 
 final class XPServerConnection: @unchecked Sendable {
     var onConnected: (() -> Void)?
 
     private let transport = XPTransportChannel()
-    private let port: UInt16
+    private let preferredPort: UInt16
+    private(set) var actualPort: UInt16 = 0
     private var isStarted = false
 
     init(port: UInt16) {
-        self.port = port
+        self.preferredPort = port
     }
 
     func start() {
         guard !isStarted else { return }
         isStarted = true
         transport.delegate = self
-        transport.listen(onPort: port)
+        #if targetEnvironment(simulator)
+        actualPort = transport.listenOnAvailablePort(
+            preferred: preferredPort,
+            range: XPConstants.simulatorPortRange
+        )
+        #else
+        transport.listen(onPort: preferredPort)
+        actualPort = preferredPort
+        #endif
+        if actualPort > 0 {
+            print("[Xpector] Listening on port \(actualPort)")
+        }
     }
 
     func stop() {
@@ -47,11 +60,32 @@ extension XPServerConnection: XPTransportDelegate {
     func transport(_ transport: XPTransportChannel, didReceiveMessage message: XPMessage, from peer: XPPeerID?) {
         switch message.type {
         case .ping:
+            let deviceType: String = {
+                #if targetEnvironment(simulator)
+                return "Simulator"
+                #else
+                var systemInfo = utsname()
+                uname(&systemInfo)
+                return withUnsafePointer(to: &systemInfo.machine) {
+                    $0.withMemoryRebound(to: CChar.self, capacity: 1) {
+                        String(validatingUTF8: $0) ?? "Unknown"
+                    }
+                }
+                #endif
+            }()
             let info = XPAppInfo(
                 appName: Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Unknown",
                 bundleID: Bundle.main.bundleIdentifier ?? "unknown",
-                deviceType: "iOS",
-                serverVersion: XPConstants.protocolVersion
+                deviceType: deviceType,
+                serverVersion: XPConstants.protocolVersion,
+                deviceName: UIDevice.current.name,
+                buildConfig: {
+                    #if DEBUG
+                    return "Debug"
+                    #else
+                    return "Release"
+                    #endif
+                }()
             )
             sendResponse(type: .pong, content: info, to: peer)
 
@@ -208,7 +242,14 @@ extension XPServerConnection: XPTransportDelegate {
     func transport(_ transport: XPTransportChannel, didFailWithError error: Error) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self, self.isStarted else { return }
-            self.transport.listen(onPort: self.port)
+            #if targetEnvironment(simulator)
+            self.actualPort = self.transport.listenOnAvailablePort(
+                preferred: self.preferredPort,
+                range: XPConstants.simulatorPortRange
+            )
+            #else
+            self.transport.listen(onPort: self.preferredPort)
+            #endif
         }
     }
 }

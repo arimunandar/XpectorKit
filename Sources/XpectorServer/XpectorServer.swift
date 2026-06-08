@@ -19,6 +19,7 @@ public final class XpectorServer: @unchecked Sendable {
     private var leakDetector: XPLeakDetector?
     private var userDefaultsCapture: XPUserDefaultsCapture?
     private var bonjourPublisher: XPBonjourPublisher?
+    private var wifiServer: XPWiFiServer?
     #if DEBUG
     private var keychainCapture: XPKeychainCapture?
     #endif
@@ -84,7 +85,17 @@ public final class XpectorServer: @unchecked Sendable {
         cachedConnection = conn
         cachedLogBufferSize = config.logBufferSize
 
-        let publisher = XPBonjourPublisher(port: selectedPort)
+        // WiFi server — plain TCP for WiFi clients (Peertalk doesn't handle WiFi reads)
+        let wifiPort = conn.actualPort + 100
+        let wifi = XPWiFiServer(port: wifiPort)
+        wifi.onMessage = { [weak self] message, clientFd in
+            guard let self else { return }
+            self.handleWiFiMessage(message, from: clientFd, server: wifi)
+        }
+        wifi.start()
+        wifiServer = wifi
+
+        let publisher = XPBonjourPublisher(port: wifiPort)
         publisher.start()
         bonjourPublisher = publisher
 
@@ -120,7 +131,7 @@ public final class XpectorServer: @unchecked Sendable {
             let network = XPNetworkCapture.shared
             network.onEntry = { [weak self] entry in
                 guard let msg = try? XPMessage(type: .networkEvent, content: entry) else { return }
-                self?.cachedConnection?.send(message: msg)
+                self?.broadcast(message: msg)
             }
             network.start()
             networkCapture = network
@@ -134,7 +145,7 @@ public final class XpectorServer: @unchecked Sendable {
         if config.enableNavigationCapture {
             let nav = XPNavigationCapture { [weak self] event in
                 guard let msg = try? XPMessage(type: .navEvent, content: event) else { return }
-                self?.cachedConnection?.send(message: msg)
+                self?.broadcast(message: msg)
             }
             nav.start()
             navigationCapture = nav
@@ -145,7 +156,7 @@ public final class XpectorServer: @unchecked Sendable {
                 guard let self, self.isRunning else { return }
                 let perf = XPPerformanceCapture { [weak self] event in
                     guard let msg = try? XPMessage(type: .perfEvent, content: event) else { return }
-                    self?.cachedConnection?.send(message: msg)
+                    self?.broadcast(message: msg)
                 }
                 perf.start()
                 self.performanceCapture = perf
@@ -155,7 +166,7 @@ public final class XpectorServer: @unchecked Sendable {
         if config.enableNotificationCapture {
             let notif = XPNotificationCapture { [weak self] event in
                 guard let msg = try? XPMessage(type: .notificationEvent, content: event) else { return }
-                self?.cachedConnection?.send(message: msg)
+                self?.broadcast(message: msg)
             }
             notif.start()
             notificationCapture = notif
@@ -167,7 +178,7 @@ public final class XpectorServer: @unchecked Sendable {
                 guard let self, self.isRunning else { return }
                 let hang = XPHangDetector(thresholdMs: thresholdMs) { [weak self] event in
                     guard let msg = try? XPMessage(type: .perfEvent, content: event) else { return }
-                    self?.cachedConnection?.send(message: msg)
+                    self?.broadcast(message: msg)
                 }
                 hang.start()
                 self.hangDetector = hang
@@ -180,7 +191,7 @@ public final class XpectorServer: @unchecked Sendable {
                 guard let self, self.isRunning else { return }
                 let leak = XPLeakDetector(checkDelayMs: delayMs) { [weak self] event in
                     guard let msg = try? XPMessage(type: .perfEvent, content: event) else { return }
-                    self?.cachedConnection?.send(message: msg)
+                    self?.broadcast(message: msg)
                 }
                 leak.start()
                 self.leakDetector = leak
@@ -272,8 +283,105 @@ public final class XpectorServer: @unchecked Sendable {
         firstPeerLock.unlock()
         conn.stop()
         conn.start()
+
+        wifiServer?.stop()
+        let wifiPort = conn.actualPort + 100
+        let wifi = XPWiFiServer(port: wifiPort)
+        wifi.onMessage = { [weak self] message, clientFd in
+            guard let self else { return }
+            self.handleWiFiMessage(message, from: clientFd, server: wifi)
+        }
+        wifi.start()
+        wifiServer = wifi
+
         bonjourPublisher?.stop()
+        bonjourPublisher = XPBonjourPublisher(port: wifiPort)
         bonjourPublisher?.start()
+    }
+
+    private func handleWiFiMessage(_ message: XPMessage, from clientFd: Int32, server: XPWiFiServer) {
+        switch message.type {
+        case .ping:
+            let info = XPAppInfo(
+                appName: Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Unknown",
+                bundleID: Bundle.main.bundleIdentifier ?? "unknown",
+                deviceType: deviceType(),
+                serverVersion: XPConstants.protocolVersion,
+                deviceName: UIDevice.current.name,
+                buildConfig: Self.currentBuildConfig
+            )
+            if let msg = try? XPMessage(type: .pong, content: info) {
+                server.send(message: msg, to: clientFd)
+            }
+
+        case .requestHierarchy:
+            let request = (try? message.decode(XPHierarchyRequest.self)) ?? XPHierarchyRequest()
+            DispatchQueue.main.async {
+                let snapshot = XPHierarchyCapture.capture(request: request)
+                if let msg = try? XPMessage(type: .hierarchyData, content: snapshot) {
+                    server.send(message: msg, to: clientFd)
+                }
+            }
+
+        case .requestContext:
+            let request = (try? message.decode(XPContextRequest.self)) ?? XPContextRequest()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let keychainSummary: [String: Int]
+                #if DEBUG
+                keychainSummary = self.getKeychainCapture()?.summaryCounts() ?? [:]
+                #else
+                keychainSummary = [:]
+                #endif
+                let snapshot = XPContextCapture.capture(
+                    request: request,
+                    networkCapture: self.getNetworkCapture(),
+                    perfCapture: self.getPerformanceCapture(),
+                    keychainSummary: keychainSummary,
+                    logEntries: self.getRecentLogEntries()
+                )
+                if let msg = try? XPMessage(type: .contextData, content: snapshot) {
+                    server.send(message: msg, to: clientFd)
+                }
+            }
+
+        case .requestNavState:
+            DispatchQueue.main.async {
+                let state = XPNavigationCapture.captureCurrentState()
+                if let msg = try? XPMessage(type: .navStateData, content: state) {
+                    server.send(message: msg, to: clientFd)
+                }
+            }
+
+        case .requestPerfSummary:
+            let summary = getPerformanceCapture()?.currentSummary()
+                ?? XPPerfSummary(currentFPS: 0, avgFPS: 0, memoryUsageMB: 0, peakMemoryMB: 0, recentHangCount: 0, droppedFrames: 0, uptimeSeconds: 0)
+            if let msg = try? XPMessage(type: .perfSummaryData, content: summary) {
+                server.send(message: msg, to: clientFd)
+            }
+
+        case .requestUserDefaults:
+            let snapshot = getUserDefaultsCapture()?.captureSnapshot()
+                ?? XPUserDefaultsSnapshot(entries: [])
+            if let msg = try? XPMessage(type: .userDefaultsSnapshotData, content: snapshot) {
+                server.send(message: msg, to: clientFd)
+            }
+
+        case .requestRecentNetwork:
+            let request = (try? message.decode(XPRecentNetworkRequest.self)) ?? XPRecentNetworkRequest()
+            let entries = getNetworkCapture()?.recentEntries(limit: request.limit, domainFilter: request.domainFilter) ?? []
+            if let msg = try? XPMessage(type: .recentNetworkData, content: entries) {
+                server.send(message: msg, to: clientFd)
+            }
+
+        default:
+            break
+        }
+    }
+
+    private func broadcast(message: XPMessage) {
+        cachedConnection?.send(message: message)
+        wifiServer?.broadcast(message: message)
     }
 
     func sendDirect(message: XPMessage) {
@@ -290,6 +398,7 @@ public final class XpectorServer: @unchecked Sendable {
 
         guard let message = try? XPMessage(type: type, content: entry) else { return }
         cachedConnection?.send(message: message)
+        wifiServer?.broadcast(message: message)
     }
 
     // MARK: - Capture Module Accessors (for XPServerConnection)
@@ -314,13 +423,26 @@ public final class XpectorServer: @unchecked Sendable {
             appName: Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Unknown",
             bundleID: Bundle.main.bundleIdentifier ?? "unknown",
             deviceType: deviceType(),
-            serverVersion: XPConstants.protocolVersion
+            serverVersion: XPConstants.protocolVersion,
+            deviceName: UIDevice.current.name,
+            buildConfig: Self.currentBuildConfig
         )
         guard let message = try? XPMessage(type: .appInfo, content: info) else { return }
         cachedConnection?.send(message: message)
     }
 
+    private static var currentBuildConfig: String {
+        #if DEBUG
+        return "Debug"
+        #else
+        return "Release"
+        #endif
+    }
+
     private func deviceType() -> String {
+        #if targetEnvironment(simulator)
+        return "Simulator"
+        #else
         var systemInfo = utsname()
         uname(&systemInfo)
         return withUnsafePointer(to: &systemInfo.machine) {
@@ -328,5 +450,6 @@ public final class XpectorServer: @unchecked Sendable {
                 String(validatingUTF8: $0) ?? "Unknown"
             }
         }
+        #endif
     }
 }
