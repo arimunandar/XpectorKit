@@ -221,6 +221,19 @@ extension XPServerConnection: XPTransportDelegate {
             let emptyMap = XPObserverMap(entries: [])
             sendResponse(type: .observerMapData, content: emptyMap, to: peer)
 
+        // MARK: - Network Throttling
+
+        case .setNetworkCondition:
+            guard let request = try? message.decode(XPNetworkConditionRequest.self) else {
+                let ack = XPNetworkConditionAck(success: false, activeProfile: XPNetworkThrottleManager.shared.activeProfile.rawValue)
+                sendResponse(type: .networkConditionAck, content: ack, to: peer)
+                return
+            }
+            let profile = XPNetworkProfile(rawValue: request.profile) ?? .wifi
+            XPNetworkThrottleManager.shared.setProfile(profile)
+            let ack = XPNetworkConditionAck(success: true, activeProfile: profile.rawValue)
+            sendResponse(type: .networkConditionAck, content: ack, to: peer)
+
         // MARK: - Performance Summary
 
         case .requestPerfSummary:
@@ -235,6 +248,7 @@ extension XPServerConnection: XPTransportDelegate {
 
     func transport(_ transport: XPTransportChannel, didChangeState connected: Bool) {
         if connected {
+            XPNetworkThrottleManager.shared.reset()
             onConnected?()
         }
     }

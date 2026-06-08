@@ -72,23 +72,45 @@ public final class XPNetworkCapture: @unchecked Sendable {
 public final class XPMonitoredSession: @unchecked Sendable {
     private let session: URLSession
     private let collector: XPDataCollector
+    private let capture: XPNetworkCapture
 
     init(configuration: URLSessionConfiguration, capture: XPNetworkCapture) {
+        self.capture = capture
         self.collector = XPDataCollector(capture: capture)
         self.session = URLSession(configuration: configuration, delegate: collector, delegateQueue: nil)
     }
 
     @discardableResult
     public func dataTask(with url: URL, completionHandler: @escaping @Sendable (Data?, URLResponse?, (any Error)?) -> Void) -> URLSessionDataTask {
+        let params = XPNetworkThrottleManager.shared.currentParams()
+        if params.lossRate >= 1.0 || (params.lossRate > 0 && Double.random(in: 0..<1) < params.lossRate) {
+            let error = URLError(.notConnectedToInternet)
+            recordThrottledEntry(url: url.absoluteString, method: "GET", error: error)
+            DispatchQueue.global().async { completionHandler(nil, nil, error) }
+            return session.dataTask(with: url)
+        }
         let task = session.dataTask(with: url)
         collector.registerCompletion(for: task.taskIdentifier, handler: completionHandler)
+        if params.delayMs > 0 {
+            collector.setDelay(for: task.taskIdentifier, delayMs: params.delayMs)
+        }
         return task
     }
 
     @discardableResult
     public func dataTask(with request: URLRequest, completionHandler: @escaping @Sendable (Data?, URLResponse?, (any Error)?) -> Void) -> URLSessionDataTask {
+        let params = XPNetworkThrottleManager.shared.currentParams()
+        if params.lossRate >= 1.0 || (params.lossRate > 0 && Double.random(in: 0..<1) < params.lossRate) {
+            let error = URLError(.notConnectedToInternet)
+            recordThrottledEntry(url: request.url?.absoluteString ?? "unknown", method: request.httpMethod ?? "GET", error: error)
+            DispatchQueue.global().async { completionHandler(nil, nil, error) }
+            return session.dataTask(with: request)
+        }
         let task = session.dataTask(with: request)
         collector.registerCompletion(for: task.taskIdentifier, handler: completionHandler)
+        if params.delayMs > 0 {
+            collector.setDelay(for: task.taskIdentifier, delayMs: params.delayMs)
+        }
         return task
     }
 
@@ -104,6 +126,23 @@ public final class XPMonitoredSession: @unchecked Sendable {
 
     public func invalidateAndCancel() { session.invalidateAndCancel() }
     public func finishTasksAndInvalidate() { session.finishTasksAndInvalidate() }
+
+    private func recordThrottledEntry(url: String, method: String, error: URLError) {
+        let entry = XPNetworkEntry(
+            url: url,
+            method: method,
+            statusCode: 0,
+            requestHeaders: [:],
+            responseHeaders: [:],
+            requestBodyPreview: nil,
+            responseBodyPreview: nil,
+            durationMs: 0,
+            bytesReceived: 0,
+            error: error.localizedDescription,
+            timestamp: Date()
+        )
+        capture.record(entry)
+    }
 }
 
 // MARK: - Data Collector Delegate
@@ -114,6 +153,7 @@ private final class XPDataCollector: NSObject, URLSessionDataDelegate, @unchecke
     private let lock = NSLock()
     private var bodies: [Int: Data] = [:]
     private var completions: [Int: (Data?, URLResponse?, (any Error)?) -> Void] = [:]
+    private var delays: [Int: Double] = [:]
 
     init(capture: XPNetworkCapture) {
         self.capture = capture
@@ -123,6 +163,12 @@ private final class XPDataCollector: NSObject, URLSessionDataDelegate, @unchecke
     func registerCompletion(for taskId: Int, handler: @escaping (Data?, URLResponse?, (any Error)?) -> Void) {
         lock.lock()
         completions[taskId] = handler
+        lock.unlock()
+    }
+
+    func setDelay(for taskId: Int, delayMs: Double) {
+        lock.lock()
+        delays[taskId] = delayMs
         lock.unlock()
     }
 
@@ -142,9 +188,16 @@ private final class XPDataCollector: NSObject, URLSessionDataDelegate, @unchecke
         lock.lock()
         let body = bodies.removeValue(forKey: task.taskIdentifier)
         let completion = completions.removeValue(forKey: task.taskIdentifier)
+        let delayMs = delays.removeValue(forKey: task.taskIdentifier)
         lock.unlock()
 
-        completion?(body, task.response, error)
+        if let delayMs, delayMs > 0 {
+            DispatchQueue.global().asyncAfter(deadline: .now() + delayMs / 1000.0) {
+                completion?(body, task.response, error)
+            }
+        } else {
+            completion?(body, task.response, error)
+        }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {

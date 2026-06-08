@@ -302,6 +302,7 @@ public final class XpectorServer: @unchecked Sendable {
     private func handleWiFiMessage(_ message: XPMessage, from clientFd: Int32, server: XPWiFiServer) {
         switch message.type {
         case .ping:
+            XPNetworkThrottleManager.shared.reset()
             let info = XPAppInfo(
                 appName: Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Unknown",
                 bundleID: Bundle.main.bundleIdentifier ?? "unknown",
@@ -371,6 +372,21 @@ public final class XpectorServer: @unchecked Sendable {
             let request = (try? message.decode(XPRecentNetworkRequest.self)) ?? XPRecentNetworkRequest()
             let entries = getNetworkCapture()?.recentEntries(limit: request.limit, domainFilter: request.domainFilter) ?? []
             if let msg = try? XPMessage(type: .recentNetworkData, content: entries) {
+                server.send(message: msg, to: clientFd)
+            }
+
+        case .setNetworkCondition:
+            guard let request = try? message.decode(XPNetworkConditionRequest.self) else {
+                let ack = XPNetworkConditionAck(success: false, activeProfile: XPNetworkThrottleManager.shared.activeProfile.rawValue)
+                if let msg = try? XPMessage(type: .networkConditionAck, content: ack) {
+                    server.send(message: msg, to: clientFd)
+                }
+                return
+            }
+            let profile = XPNetworkProfile(rawValue: request.profile) ?? .wifi
+            XPNetworkThrottleManager.shared.setProfile(profile)
+            let ack = XPNetworkConditionAck(success: true, activeProfile: profile.rawValue)
+            if let msg = try? XPMessage(type: .networkConditionAck, content: ack) {
                 server.send(message: msg, to: clientFd)
             }
 

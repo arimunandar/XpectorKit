@@ -93,6 +93,15 @@ final class XPURLProtocolInterceptor: URLProtocol, @unchecked Sendable {
         startTime = CFAbsoluteTimeGetCurrent()
         responseData = Data()
 
+        let params = XPNetworkThrottleManager.shared.currentParams()
+
+        if params.lossRate >= 1.0 || (params.lossRate > 0 && Double.random(in: 0..<1) < params.lossRate) {
+            let error = URLError(.notConnectedToInternet)
+            client?.urlProtocol(self, didFailWithError: error)
+            recordEntry(error: error)
+            return
+        }
+
         guard let mutable = (request as NSURLRequest).mutableCopy() as? NSMutableURLRequest else {
             client?.urlProtocol(self, didFailWithError: URLError(.badURL))
             return
@@ -109,24 +118,49 @@ final class XPURLProtocolInterceptor: URLProtocol, @unchecked Sendable {
             mutable.httpBody = body
         }
 
-        dataTask = Self.forwardingSession.dataTask(with: mutable as URLRequest) { [weak self] data, response, error in
+        let dispatchBlock = { [weak self] in
             guard let self else { return }
-            if let data {
-                self.responseData.append(data)
-                self.client?.urlProtocol(self, didLoad: data)
+            self.dataTask = Self.forwardingSession.dataTask(with: mutable as URLRequest) { [weak self] data, response, error in
+                guard let self else { return }
+                if let data {
+                    self.responseData.append(data)
+                }
+                if let http = response as? HTTPURLResponse {
+                    self.capturedResponse = http
+                }
+
+                let finishBlock = { [weak self] in
+                    guard let self else { return }
+                    if let data {
+                        self.client?.urlProtocol(self, didLoad: data)
+                    }
+                    if let http = self.capturedResponse {
+                        self.client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
+                    }
+                    if let error {
+                        self.client?.urlProtocol(self, didFailWithError: error)
+                    } else {
+                        self.client?.urlProtocolDidFinishLoading(self)
+                    }
+                    self.recordEntry(error: error)
+                }
+
+                let bwParams = XPNetworkThrottleManager.shared.currentParams()
+                if bwParams.bandwidthBps > 0 && self.responseData.count > 0 {
+                    let delaySecs = Double(self.responseData.count) / bwParams.bandwidthBps
+                    DispatchQueue.global().asyncAfter(deadline: .now() + delaySecs, execute: finishBlock)
+                } else {
+                    finishBlock()
+                }
             }
-            if let http = response as? HTTPURLResponse {
-                self.capturedResponse = http
-                self.client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
-            }
-            if let error {
-                self.client?.urlProtocol(self, didFailWithError: error)
-            } else {
-                self.client?.urlProtocolDidFinishLoading(self)
-            }
-            self.recordEntry(error: error)
+            self.dataTask?.resume()
         }
-        dataTask?.resume()
+
+        if params.delayMs > 0 {
+            DispatchQueue.global().asyncAfter(deadline: .now() + params.delayMs / 1000.0, execute: dispatchBlock)
+        } else {
+            dispatchBlock()
+        }
     }
 
     override func stopLoading() {

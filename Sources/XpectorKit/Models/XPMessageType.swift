@@ -37,4 +37,6 @@ public enum XPMessageType: UInt32, Codable, Sendable {
     case perfSummaryData = 582
     case requestUserDefaults = 590
     case userDefaultsSnapshotData = 591
+    case setNetworkCondition = 600
+    case networkConditionAck = 601
 }
