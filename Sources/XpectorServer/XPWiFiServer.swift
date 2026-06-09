@@ -10,6 +10,10 @@ final class XPWiFiServer: @unchecked Sendable {
 
     var onMessage: ((XPMessage, Int32) -> Void)?
 
+    /// Maximum accepted size for an inbound (command) frame. Requests are tiny
+    /// JSON; this bounds per-connection memory for an unauthenticated peer.
+    private static let maxInboundFrameBytes: UInt32 = 4 * 1024 * 1024
+
     init(port: UInt16) {
         self.port = port
     }
@@ -171,10 +175,14 @@ final class XPWiFiServer: @unchecked Sendable {
         })
 
         var payload = Data()
-        if size > 0 && size < 10_000_000 {
+        // Inbound frames are small command requests; cap the declared size so an
+        // unauthenticated peer can't force a large allocation per connection.
+        if size > 0 && size <= Self.maxInboundFrameBytes {
             var buf = [UInt8](repeating: 0, count: Int(size))
             guard readExact(fd, &buf, Int(size)) else { return nil }
             payload = Data(buf)
+        } else if size > Self.maxInboundFrameBytes {
+            return nil
         }
 
         return RawFrame(type: type, payload: payload)

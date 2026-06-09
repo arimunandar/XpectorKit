@@ -34,17 +34,53 @@ public final class XPNetworkCapture: @unchecked Sendable {
         return XPMonitoredSession(configuration: configuration, capture: self)
     }
 
+    /// Header names whose values are credentials/secrets and must never leave the
+    /// device in captured traffic.
+    private static let sensitiveHeaderKeys: Set<String> = [
+        "authorization", "proxy-authorization", "authentication",
+        "cookie", "set-cookie",
+        "x-api-key", "api-key", "apikey",
+        "x-auth-token", "x-access-token", "x-csrf-token", "x-xsrf-token",
+    ]
+
+    /// Replaces the value of any sensitive header with `<redacted>` so bearer
+    /// tokens, cookies, and API keys are not exposed to a connected inspector.
+    static func redactHeaders(_ headers: [String: String]) -> [String: String] {
+        var out = headers
+        for key in out.keys where sensitiveHeaderKeys.contains(key.lowercased()) {
+            out[key] = "<redacted>"
+        }
+        return out
+    }
+
     public func record(_ entry: XPNetworkEntry) {
+        // Redact at the single choke point so every capture path (URLProtocol
+        // interceptor and monitored-session metrics) is covered.
+        let safe = XPNetworkEntry(
+            id: entry.id,
+            url: entry.url,
+            method: entry.method,
+            statusCode: entry.statusCode,
+            requestHeaders: Self.redactHeaders(entry.requestHeaders),
+            responseHeaders: Self.redactHeaders(entry.responseHeaders),
+            requestBodyPreview: entry.requestBodyPreview,
+            responseBodyPreview: entry.responseBodyPreview,
+            durationMs: entry.durationMs,
+            bytesReceived: entry.bytesReceived,
+            error: entry.error,
+            timestamp: entry.timestamp
+        )
+
         lock.lock()
         guard _isCapturing else { lock.unlock(); return }
-        _buffer.append(entry)
+        _buffer.append(safe)
         if _buffer.count > Self.maxBufferSize {
             _buffer.removeFirst(_buffer.count - Self.maxBufferSize)
         }
         let callback = onEntry
         lock.unlock()
 
-        callback?(entry)
+        callback?(safe)
     }
 
     func recentEntries(limit: Int = 50, domainFilter: String? = nil) -> [XPNetworkEntry] {

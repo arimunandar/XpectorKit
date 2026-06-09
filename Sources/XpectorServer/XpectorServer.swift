@@ -6,6 +6,14 @@ import XpectorKit
 public final class XpectorServer: @unchecked Sendable {
     public static let shared = XpectorServer()
 
+    /// Allows the inspection server to run in non-DEBUG (Release / App Store)
+    /// builds. **Off by default**, so a misconfigured release build never opens
+    /// the unauthenticated WiFi listener or starts capturing user data — even if
+    /// the host app forgets to wrap `start()` in `#if DEBUG`. Only set this to
+    /// `true` for internal/enterprise distribution builds you fully control;
+    /// never for App Store releases.
+    public static var allowInReleaseBuilds = false
+
     private var connection: XPServerConnection?
     private var logCapture: XPLogCapture?
     private var osLogCapture: XPOSLogCapture?
@@ -53,6 +61,17 @@ public final class XpectorServer: @unchecked Sendable {
             return true
         }
         guard shouldStart else { return }
+
+        // Fail closed in Release builds: the server exposes app internals over an
+        // unauthenticated socket, so it must never run for shipped end users
+        // unless the integrator has deliberately opted in.
+        #if !DEBUG
+        guard XpectorServer.allowInReleaseBuilds else {
+            stateQueue.sync { isRunning = false }
+            print("[Xpector] Inspection server is disabled in Release builds. Set XpectorServer.allowInReleaseBuilds = true to override (do NOT do this for App Store builds).")
+            return
+        }
+        #endif
 
         let selectedPort = config.port
 
