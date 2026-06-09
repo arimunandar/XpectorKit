@@ -143,7 +143,7 @@ public final class XpectorServer: @unchecked Sendable {
         }
 
         if config.enableNavigationCapture {
-            let nav = XPNavigationCapture { [weak self] event in
+            let nav = XPNavigationCapture(captureScreenshots: config.enableNavigationScreenshots) { [weak self] event in
                 guard let msg = try? XPMessage(type: .navEvent, content: event) else { return }
                 self?.broadcast(message: msg)
             }

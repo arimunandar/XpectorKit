@@ -5,6 +5,7 @@ public struct XPConfiguration: Sendable {
     public var enableNetworkCapture: Bool
     public var enableAutomaticNetworkInterception: Bool
     public var enableNavigationCapture: Bool
+    public var enableNavigationScreenshots: Bool
     public var enablePerformanceCapture: Bool
     public var enableNotificationCapture: Bool
     public var enableHangDetection: Bool
@@ -19,6 +20,7 @@ public struct XPConfiguration: Sendable {
         enableNetworkCapture: Bool = true,
         enableAutomaticNetworkInterception: Bool = true,
         enableNavigationCapture: Bool = true,
+        enableNavigationScreenshots: Bool = true,
         enablePerformanceCapture: Bool = true,
         enableNotificationCapture: Bool = false,
         enableHangDetection: Bool = false,
@@ -32,6 +34,7 @@ public struct XPConfiguration: Sendable {
         self.enableNetworkCapture = enableNetworkCapture
         self.enableAutomaticNetworkInterception = enableAutomaticNetworkInterception
         self.enableNavigationCapture = enableNavigationCapture
+        self.enableNavigationScreenshots = enableNavigationScreenshots
         self.enablePerformanceCapture = enablePerformanceCapture
         self.enableNotificationCapture = enableNotificationCapture
         self.enableHangDetection = enableHangDetection

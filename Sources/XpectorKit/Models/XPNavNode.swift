@@ -42,12 +42,14 @@ public struct XPNavEvent: Codable, Sendable, Identifiable {
     public let fromVC: String?
     public let toVC: String?
     public let timestamp: Date
+    public let screenshot: Data?
 
-    public init(id: UUID = UUID(), type: XPNavEventType, fromVC: String?, toVC: String?, timestamp: Date = Date()) {
+    public init(id: UUID = UUID(), type: XPNavEventType, fromVC: String?, toVC: String?, timestamp: Date = Date(), screenshot: Data? = nil) {
         self.id = id
         self.type = type
         self.fromVC = fromVC
         self.toVC = toVC
         self.timestamp = timestamp
+        self.screenshot = screenshot
     }
 }

@@ -4,6 +4,7 @@ import XpectorKit
 
 final class XPNavigationCapture: @unchecked Sendable {
     private let onEvent: (XPNavEvent) -> Void
+    private let captureScreenshots: Bool
     private let lock = NSLock()
     private var _isCapturing = false
     private var isCapturing: Bool {
@@ -21,8 +22,33 @@ final class XPNavigationCapture: @unchecked Sendable {
     // Track nav stack depth per UINavigationController to distinguish push vs pop
     private static var navStackDepths: [ObjectIdentifier: Int] = [:]
 
-    init(onEvent: @escaping (XPNavEvent) -> Void) {
+    private static var lastScreenshotTime: CFAbsoluteTime = 0
+
+    init(captureScreenshots: Bool = true, onEvent: @escaping (XPNavEvent) -> Void) {
+        self.captureScreenshots = captureScreenshots
         self.onEvent = onEvent
+    }
+
+    static func captureNavThumbnail() -> Data? {
+        dispatchPrecondition(condition: .onQueue(.main))
+
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastScreenshotTime >= 0.2 else { return nil }
+        lastScreenshotTime = now
+
+        guard let fullPNG = XPHierarchyCapture.captureFullScreenshot() else { return nil }
+        guard let image = UIImage(data: fullPNG) else { return nil }
+
+        let targetWidth: CGFloat = 320
+        let scale = targetWidth / image.size.width
+        guard scale < 1 else { return image.jpegData(compressionQuality: 0.5) }
+        let targetSize = CGSize(width: targetWidth, height: image.size.height * scale)
+
+        let renderer = UIGraphicsImageRenderer(size: targetSize)
+        let resized = renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+        return resized.jpegData(compressionQuality: 0.5)
     }
 
     // MARK: - Start / Stop
@@ -39,6 +65,38 @@ final class XPNavigationCapture: @unchecked Sendable {
         isCapturing = false
         XPNavigationCapture.activeInstance = nil
         XPNavigationCapture.navStackDepths.removeAll()
+        XPNavigationCapture.didEmitInitialScreen = false
+    }
+
+    private static var didEmitInitialScreen = false
+
+    static func emitCurrentScreenEvent() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard !didEmitInitialScreen else { return }
+        didEmitInitialScreen = true
+        guard let instance = activeInstance else { return }
+        guard let rootVC = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .flatMap(\.windows)
+            .first(where: { $0.isKeyWindow })?.rootViewController else { return }
+        let topVC = Self.findTopViewController(from: rootVC)
+        let vcName = vcDisplayName(topVC)
+        let thumbnail = instance.captureScreenshots ? captureNavThumbnail() : nil
+        let event = XPNavEvent(type: .push, fromVC: nil, toVC: vcName, screenshot: thumbnail)
+        instance.onEvent(event)
+    }
+
+    private static func findTopViewController(from vc: UIViewController) -> UIViewController {
+        if let presented = vc.presentedViewController {
+            return findTopViewController(from: presented)
+        }
+        if let nav = vc as? UINavigationController, let top = nav.topViewController {
+            return findTopViewController(from: top)
+        }
+        if let tab = vc as? UITabBarController, let selected = tab.selectedViewController {
+            return findTopViewController(from: selected)
+        }
+        return vc
     }
 
     // MARK: - On-Demand State Capture
@@ -197,10 +255,13 @@ final class XPNavigationCapture: @unchecked Sendable {
                 original(vc, dismissSelector, animated, {
                     completion?()
 
+                    let thumbnail = XPNavigationCapture.activeInstance?.captureScreenshots == true
+                        ? XPNavigationCapture.captureNavThumbnail() : nil
                     let event = XPNavEvent(
                         type: .dismiss,
                         fromVC: fromVC,
-                        toVC: toVC
+                        toVC: toVC,
+                        screenshot: thumbnail
                     )
                     XPNavigationCapture.activeInstance?.onEvent(event)
                 })
@@ -250,10 +311,11 @@ final class XPNavigationCapture: @unchecked Sendable {
         guard let instance = activeInstance else { return }
 
         let vcName = vcDisplayName(vc)
+        let thumbnail = instance.captureScreenshots ? captureNavThumbnail() : nil
 
         if context.isBeingPresented {
             let fromVC = context.presentingVC.map { vcDisplayName($0) }
-            let event = XPNavEvent(type: .present, fromVC: fromVC, toVC: vcName)
+            let event = XPNavEvent(type: .present, fromVC: fromVC, toVC: vcName, screenshot: thumbnail)
             instance.onEvent(event)
         } else if let nav = context.navController {
             let navId = ObjectIdentifier(nav)
@@ -263,20 +325,20 @@ final class XPNavigationCapture: @unchecked Sendable {
 
             if currentDepth > previousDepth && currentDepth > 1 {
                 let previousVC = context.previousStackVC.map { vcDisplayName($0) }
-                let event = XPNavEvent(type: .push, fromVC: previousVC, toVC: vcName)
+                let event = XPNavEvent(type: .push, fromVC: previousVC, toVC: vcName, screenshot: thumbnail)
                 instance.onEvent(event)
             } else if currentDepth < previousDepth {
-                let event = XPNavEvent(type: .pop, fromVC: nil, toVC: vcName)
+                let event = XPNavEvent(type: .pop, fromVC: nil, toVC: vcName, screenshot: thumbnail)
                 instance.onEvent(event)
             } else if currentDepth == 1 && previousDepth == 0 {
-                let event = XPNavEvent(type: .push, fromVC: nil, toVC: vcName)
+                let event = XPNavEvent(type: .push, fromVC: nil, toVC: vcName, screenshot: thumbnail)
                 instance.onEvent(event)
             }
         } else if context.isTabRelated {
-            let event = XPNavEvent(type: .tabSwitch, fromVC: nil, toVC: vcName)
+            let event = XPNavEvent(type: .tabSwitch, fromVC: nil, toVC: vcName, screenshot: thumbnail)
             instance.onEvent(event)
         } else {
-            let event = XPNavEvent(type: .push, fromVC: nil, toVC: vcName)
+            let event = XPNavEvent(type: .push, fromVC: nil, toVC: vcName, screenshot: thumbnail)
             instance.onEvent(event)
         }
     }
