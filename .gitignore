@@ -19,6 +19,7 @@ Pods/
 
 # Generated
 *.xcodeproj
+XpectorDemo/XpectorDemo/Info.plist
 
 # OS
 .DS_Store

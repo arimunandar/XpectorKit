@@ -6,6 +6,13 @@ options:
   xcodeVersion: "16.0"
   generateEmptyDirectories: true
 
+# Staging is release-class (optimized, no DEBUG) but still runs the inspector,
+# proving Xpector works in a non-DEBUG configuration.
+configs:
+  Debug: debug
+  Staging: release
+  Release: release
+
 packages:
   XpectorKit:
     path: ..
@@ -22,27 +29,33 @@ targets:
       - package: XpectorKit
         product: XpectorKit
     info:
+      path: XpectorDemo/Info.plist
       properties:
         NSLocalNetworkUsageDescription: "Xpector uses the local network to connect to the Mac debugging tool."
         NSBonjourServices:
           - "_xpector._tcp"
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UIApplicationSupportsIndirectInputEvents: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
     settings:
       base:
-        INFOPLIST_GENERATION: YES
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
-        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
-        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         SWIFT_EMIT_LOC_STRINGS: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
-        OTHER_SWIFT_FLAGS: "-DDEBUG"
       configs:
         Debug:
-          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG XPECTOR_ENABLED
+        Staging:
+          # Compiles as Release (no DEBUG) but still runs Xpector — mirrors a
+          # consumer's Staging/Canary config. XPECTOR_ENABLED is the single
+          # source of truth for whether the inspector is active.
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: XPECTOR_ENABLED
         Release:
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: ""

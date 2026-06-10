@@ -53,6 +53,25 @@ public final class XpectorServer: @unchecked Sendable {
         start(config: config)
     }
 
+    /// Opts the inspection server in for non-DEBUG builds, then starts it.
+    ///
+    /// Use this for development-class configurations that compile as *Release*
+    /// (e.g. a Staging/Canary/QA scheme) where `start()` alone would fail closed
+    /// because `allowInReleaseBuilds` defaults to `false`. It simply sets
+    /// `allowInReleaseBuilds = true` and calls `start(config:)` in one
+    /// intention-revealing step.
+    ///
+    /// - Important: Call this ONLY from a code path you have deliberately gated
+    ///   to your non-production configurations — either behind your own compile
+    ///   flag (e.g. `#if XPECTOR_ENABLED`) or a runtime environment check. Never
+    ///   call it unconditionally, and never enable it for your App Store /
+    ///   production configuration: it exposes app internals over an
+    ///   unauthenticated local socket.
+    public func startForDevelopment(config: XPConfiguration = XPConfiguration()) {
+        XpectorServer.allowInReleaseBuilds = true
+        start(config: config)
+    }
+
     public func start(config: XPConfiguration) {
         let shouldStart: Bool = stateQueue.sync {
             guard !isRunning else { return false }

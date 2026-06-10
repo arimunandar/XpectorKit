@@ -49,6 +49,132 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
 That's it. Open the Xpector Mac app — it auto-connects.
 
+## Enabling in non-Release configurations
+
+The Quick Start uses `#if DEBUG`, which covers the stock *Debug* config. Many
+apps also have **release-class** development configurations — Staging, Canary,
+QA, Beta — that compile *without* `DEBUG` but still want the inspector.
+
+Two things make this slightly more involved than CocoaPods'
+`pod 'Wormholy', :configurations => [...]`:
+
+- XpectorKit is **SPM-only**. SPM can't conditionally link a product per
+  configuration, and a consumer can't inject a compilation condition into the
+  package's *own* compilation. Xcode only auto-defines `DEBUG` for the package
+  in the stock Debug config — so the SDK can't reliably see your custom configs.
+- Because of that, the SDK never hardcodes config names. **You** decide which of
+  **your** configs activate it, from your app target, where your per-config
+  flags are real. The contract is simply: *call `startForDevelopment()` only
+  where you want the inspector* — never unconditionally, never in production.
+
+`startForDevelopment()` sets `allowInReleaseBuilds = true` and starts in one
+call, so it works in release-class configs where plain `start()` fails closed.
+
+Choose **either** style below — both use the same SDK API.
+
+### Style A — compile-flag gating (recommended)
+
+Define any compilation condition (we suggest `XPECTOR_ENABLED`) in
+`SWIFT_ACTIVE_COMPILATION_CONDITIONS` for **your app target**, in whichever
+configs should run the inspector. Example mapping for a Dev/Staging/Canary/Release
+scheme (substitute your own config names):
+
+| Config   | `SWIFT_ACTIVE_COMPILATION_CONDITIONS`  |
+|----------|----------------------------------------|
+| Dev      | `$(inherited) DEBUG XPECTOR_ENABLED`   |
+| Staging  | `$(inherited) XPECTOR_ENABLED`         |
+| Canary   | `$(inherited) XPECTOR_ENABLED`         |
+| Release  | `$(inherited)`  *(nothing added)*      |
+
+**In a stock Xcode project** (no project generator), set this in the build
+settings editor: select your app target → **Build Settings** → search for
+*Active Compilation Conditions* → expand the row and edit each configuration so
+the flagged ones include `XPECTOR_ENABLED` and Release does not. Or set it in an
+`.xcconfig`:
+
+```
+// Staging.xcconfig
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) XPECTOR_ENABLED
+```
+
+**With [XcodeGen](https://github.com/yonaskolb/XcodeGen)** (`project.yml`), set it
+per-config under your target's `settings.configs`:
+
+```yaml
+targets:
+  MyApp:
+    settings:
+      configs:
+        Dev:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG XPECTOR_ENABLED
+        Staging:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: XPECTOR_ENABLED
+        Canary:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: XPECTOR_ENABLED
+        Release:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: ""
+```
+
+If Staging/Canary aren't already declared, map them to a release-class base at
+the project level so they compile optimized and without `DEBUG`:
+
+```yaml
+configs:
+  Dev: debug
+  Staging: release
+  Canary: release
+  Release: release
+```
+
+(Tuist, Bazel, and other generators expose the same `SWIFT_ACTIVE_COMPILATION_CONDITIONS`
+build setting — the flag name and mapping are identical.)
+
+Then guard the launch call with the same flag:
+
+```swift
+import XpectorServer
+
+@main
+struct MyApp: App {
+    init() {
+        #if XPECTOR_ENABLED
+        // Required for non-DEBUG configs (Staging/Canary); harmless in Dev.
+        XpectorServer.shared.startForDevelopment()
+        #endif
+    }
+
+    var body: some Scene {
+        WindowGroup { ContentView() }
+    }
+}
+```
+
+In Release, `XPECTOR_ENABLED` is undefined, so the block is compiled out of your
+app target and `start()` is never called. The SDK's internal `allowInReleaseBuilds`
+backstop remains a second line of defense if the flag is ever misconfigured.
+
+> Map the flag onto whatever configs you have — only `Debug`, or `Dev`+`QA`, etc.
+> The SDK doesn't care about the names.
+
+### Style B — pure runtime gating (no build-setting changes)
+
+If you'd rather not touch build settings, gate on any runtime signal you already
+have — an environment enum, scheme/bundle-id, TestFlight (`sandboxReceipt`)
+detection, a remote flag, etc. The enable path is entirely runtime, so this works
+with no compile flags:
+
+```swift
+import XpectorServer
+
+if AppEnvironment.current != .production {
+    XpectorServer.shared.startForDevelopment()
+}
+```
+
+> ⚠️ **App Store safety:** never enable the flag/signal for your production /
+> Release configuration, and never call `startForDevelopment()` unconditionally.
+> It opens an unauthenticated local socket and streams app internals.
+
 ## Features
 
 | Feature | What it captures | Auto |

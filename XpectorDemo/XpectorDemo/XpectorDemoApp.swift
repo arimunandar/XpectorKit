@@ -4,7 +4,11 @@ import XpectorServer
 @main
 struct XpectorDemoApp: App {
     init() {
-        XpectorServer.shared.start()
+        #if XPECTOR_ENABLED
+        // startForDevelopment() opts non-DEBUG configs (e.g. Staging) in.
+        // The #if strips this entirely from Release, where XPECTOR_ENABLED is undefined.
+        XpectorServer.shared.startForDevelopment()
+        #endif
     }
 
     var body: some Scene {
