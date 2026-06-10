@@ -31,17 +31,14 @@ final class XPHierarchyCapture {
 
         var pendingImages: [UUID: UIImage] = [:]
         var windowNodes: [XPViewNode] = []
-        for scene in UIApplication.shared.connectedScenes {
-            guard let windowScene = scene as? UIWindowScene else { continue }
-            for window in windowScene.windows {
-                let node = captureView(
-                    window,
-                    parentFrameToRoot: .zero,
-                    request: request,
-                    pendingImages: &pendingImages
-                )
-                windowNodes.append(node)
-            }
+        for window in orderedWindows() {
+            let node = captureView(
+                window,
+                parentFrameToRoot: .zero,
+                request: request,
+                pendingImages: &pendingImages
+            )
+            windowNodes.append(node)
         }
 
         let timestamp = Date()
@@ -64,6 +61,35 @@ final class XPHierarchyCapture {
                 windows: windows
             ))
         }
+    }
+
+    /// A deterministic, back-to-front window list — mirrors Lookin's
+    /// `LKS_MultiplatformAdapter allWindows`. `UIApplication.connectedScenes`
+    /// is a `Set`, so iterating it (and capturing windows in that order) yields
+    /// nondeterministic root z-ordering across snapshots: a frontmost window
+    /// (keyboard, alert, status-bar window) could land above *or* below the
+    /// main window from one capture to the next, which reads as the hierarchy
+    /// "flipping." Sorting by `windowLevel` ascending pins roots to their real
+    /// on-screen z-stacking (backmost first, frontmost last) — the same
+    /// array-order semantics Xcode/Lookin use, just made stable. The key window
+    /// sorts last within an equal level (it's the frontmost), and the original
+    /// enumeration index breaks any remaining ties.
+    private static func orderedWindows() -> [UIWindow] {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .enumerated()
+            .sorted { lhs, rhs in
+                let a = lhs.element, b = rhs.element
+                if a.windowLevel != b.windowLevel {
+                    return a.windowLevel < b.windowLevel
+                }
+                if a.isKeyWindow != b.isKeyWindow {
+                    return !a.isKeyWindow // non-key sorts before key (key window is frontmost)
+                }
+                return lhs.offset < rhs.offset
+            }
+            .map { $0.element }
     }
 
     private static func injectScreenshots(into node: inout XPViewNode, encoded: [UUID: Data]) {
