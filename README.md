@@ -101,6 +101,43 @@ Crash]`** entry — with the signal name and a backtrace — in the **Logs** tab
 Tap it for the full, copyable stack trace. (Capturing a crash requires running
 without the Xcode debugger attached, which otherwise intercepts the signal.)
 
+## Watch logs & network in any browser (same WiFi)
+
+XpectorKit also serves a **read-only live viewer over plain HTTP** — no Mac app,
+no cloud, no USB. On DEBUG builds it's on by default. When the server starts it
+prints a URL:
+
+```
+[Xpector] Log stream: http://192.168.1.42:47267/
+```
+
+Open that URL in **any browser on the same WiFi** (your laptop, a tablet, a
+second phone) and watch, live, via Server-Sent Events:
+
+- **Logs** — `print` / `NSLog` / `os_log` / crash lines, with level coloring.
+- **Network requests** — each request as a `METHOD status url duration` row;
+  click one to expand its headers and request/response body previews. Bodies and
+  sensitive headers are **redacted on egress**, the same as what's sent to the
+  Mac/remote inspector.
+
+A text filter spans both, there's an autoscroll toggle, and a recent buffer of
+logs **and** requests replays on connect so you immediately see context. The
+browser auto-reconnects after a backgrounded app foregrounds. From the iOS
+Simulator, the host shares loopback — open `http://localhost:47267/`.
+
+- **Port** is derived automatically: `inspection port + 101` (e.g. `47267`).
+- **Opt out:** set `enableLocalLogStream = false` on your `XPConfiguration`, or
+  set `XPECTOR_LOG_STREAM_DISABLED=1` in the scheme environment to keep
+  auto-start but not open the HTTP port.
+
+> **Security.** This is the **same LAN trust boundary** as Xpector's existing
+> WiFi server — an unauthenticated, read-only log view on your local network. It
+> adds no new exposure class, opens **only** when the inspection server does
+> (DEBUG-gated, fails closed in Release), and serves plain HTTP (no TLS — a
+> browser can't trust a self-signed cert on a bare LAN IP without friction, and
+> the local trust boundary makes it unnecessary). Logs can contain secrets/PII,
+> as with every Xpector channel — keep it to networks you trust.
+
 ## Enabling in non-Release configurations
 
 The Quick Start uses `#if DEBUG`, which covers the stock *Debug* config. Many
@@ -282,6 +319,7 @@ config.enablePerformanceCapture = true        // FPS + memory
 config.enableLeakDetection = true             // VC dealloc checks
 config.enableHangDetection = false            // main thread watchdog
 config.enableNotificationCapture = false      // NSNotification events
+config.enableLocalLogStream = true            // LAN browser log viewer (HTTP/SSE)
 config.logBufferSize = 100                    // recent logs kept in memory
 config.networkBufferSize = 200                // recent requests kept
 config.hangThresholdMs = 500                  // hang detection threshold
@@ -312,6 +350,7 @@ iOS App                          Mac
 **Ports:**
 - Simulator: 47164–47169 (auto-selects first available)
 - WiFi server: Peertalk port + 100
+- LAN log-stream HTTP server: Peertalk port + 101
 
 **Discovery:**
 - Bonjour service type: `_xpector._tcp.`
@@ -343,6 +382,7 @@ XpectorKit/
 │       ├── XpectorServer      # Entry point, lifecycle
 │       ├── XPServerConnection # Peertalk message handler
 │       ├── XPWiFiServer       # Plain TCP for WiFi
+│       ├── XPHttpLogServer    # LAN HTTP/SSE log viewer
 │       ├── XPBonjourPublisher # mDNS advertising
 │       ├── XPLogCapture       # stdout/stderr
 │       ├── XPOSLogCapture     # os_log

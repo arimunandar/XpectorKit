@@ -31,6 +31,7 @@ public final class XpectorServer: @unchecked Sendable {
     private var userDefaultsCapture: XPUserDefaultsCapture?
     private var bonjourPublisher: XPBonjourPublisher?
     private var wifiServer: XPWiFiServer?
+    private var httpLogServer: XPHttpLogServer?
     #if DEBUG
     private var keychainCapture: XPKeychainCapture?
     #endif
@@ -51,6 +52,11 @@ public final class XpectorServer: @unchecked Sendable {
 
     private let logBufferLock = NSLock()
     private var logBuffer: [XPLogEntry] = []
+    /// Recent navigation events, replayed to a freshly-connected LAN viewer so
+    /// its Flow tab shows history immediately. Capped — each carries a thumbnail.
+    private let navBufferLock = NSLock()
+    private var navBuffer: [XPNavEvent] = []
+    private static let navBufferSize = 40
     private var foregroundObserver: NSObjectProtocol?
 
     private init() {}
@@ -183,6 +189,33 @@ public final class XpectorServer: @unchecked Sendable {
         publisher.start()
         bonjourPublisher = publisher
 
+        // LAN HTTP/SSE log viewer — open the printed URL in any browser on the
+        // same WiFi to watch live logs (no Mac app, no cloud, no USB). Read-only;
+        // same trust boundary as the WiFi server above.
+        if config.enableLocalLogStream {
+            let httpPort = conn.actualPort + 101
+            let httpServer = XPHttpLogServer(
+                port: httpPort,
+                recentLogs: { [weak self] in self?.getRecentLogEntries() ?? [] },
+                // Replay recent requests (redacted, like the live push) so a
+                // fresh viewer sees network history too.
+                recentNetwork: {
+                    XPNetworkCapture.shared.recentEntries(limit: 50).map(XPNetworkCapture.redactedEntry)
+                },
+                recentLeaks: { XPInAppLeakStore.shared.entries() },
+                recentNav: { [weak self] in self?.getRecentNavEvents() ?? [] },
+                // The live Current-screen feed reuses the navigation-screenshot
+                // opt-in, so disabling screenshots disables it too.
+                currentScreenshot: config.enableNavigationScreenshots
+                    ? { [weak self] in self?.currentScreenJPEG() }
+                    : { nil }
+            )
+            httpServer.start()
+            httpLogServer = httpServer
+            let host = xpLocalWiFiAddress() ?? "localhost"
+            print("[Xpector] Log stream: http://\(host):\(httpPort)/")
+        }
+
         foregroundObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.willEnterForegroundNotification,
             object: nil,
@@ -229,6 +262,7 @@ public final class XpectorServer: @unchecked Sendable {
             network.onEntry = { [weak self] entry in
                 // Redact on egress — the buffer is raw for the on-device inspector.
                 let safe = XPNetworkCapture.redactedEntry(entry)
+                self?.httpLogServer?.pushNetwork(safe)
                 guard let msg = try? XPMessage(type: .networkEvent, content: safe) else { return }
                 self?.broadcast(message: msg)
             }
@@ -243,6 +277,8 @@ public final class XpectorServer: @unchecked Sendable {
 
         if config.enableNavigationCapture {
             let nav = XPNavigationCapture(captureScreenshots: config.enableNavigationScreenshots) { [weak self] event in
+                self?.recordNavEvent(event)
+                self?.httpLogServer?.pushNav(event)
                 guard let msg = try? XPMessage(type: .navEvent, content: event) else { return }
                 self?.broadcast(message: msg)
             }
@@ -254,7 +290,10 @@ public final class XpectorServer: @unchecked Sendable {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                 guard let self, self.isRunning else { return }
                 let perf = XPPerformanceCapture { [weak self] event in
-                    if event.type == .leak { XPInAppLeakStore.shared.record(event) }
+                    if event.type == .leak {
+                        XPInAppLeakStore.shared.record(event)
+                        self?.httpLogServer?.pushLeak(event)
+                    }
                     guard let msg = try? XPMessage(type: .perfEvent, content: event) else { return }
                     self?.broadcast(message: msg)
                 }
@@ -291,6 +330,7 @@ public final class XpectorServer: @unchecked Sendable {
                 guard let self, self.isRunning else { return }
                 let leak = XPLeakDetector(checkDelayMs: delayMs) { [weak self] event in
                     XPInAppLeakStore.shared.record(event)
+                    self?.httpLogServer?.pushLeak(event)
                     guard let msg = try? XPMessage(type: .perfEvent, content: event) else { return }
                     self?.broadcast(message: msg)
                 }
@@ -335,6 +375,8 @@ public final class XpectorServer: @unchecked Sendable {
             userDefaultsCapture = nil
             bonjourPublisher?.stop()
             bonjourPublisher = nil
+            httpLogServer?.stop()
+            httpLogServer = nil
             if let obs = foregroundObserver {
                 NotificationCenter.default.removeObserver(obs)
             }
@@ -378,6 +420,10 @@ public final class XpectorServer: @unchecked Sendable {
         logBufferLock.lock()
         logBuffer.removeAll()
         logBufferLock.unlock()
+
+        navBufferLock.lock()
+        navBuffer.removeAll()
+        navBufferLock.unlock()
 
         snapshot.conn?.stop()
     }
@@ -519,6 +565,8 @@ public final class XpectorServer: @unchecked Sendable {
         }
         logBufferLock.unlock()
 
+        httpLogServer?.push(entry)
+
         guard let message = try? XPMessage(type: type, content: entry) else { return }
         cachedConnection?.send(message: message)
         wifiServer?.broadcast(message: message)
@@ -539,6 +587,40 @@ public final class XpectorServer: @unchecked Sendable {
         let entries = logBuffer
         logBufferLock.unlock()
         return entries
+    }
+
+    private func recordNavEvent(_ event: XPNavEvent) {
+        navBufferLock.lock()
+        navBuffer.append(event)
+        if navBuffer.count > Self.navBufferSize {
+            navBuffer.removeFirst(navBuffer.count - Self.navBufferSize)
+        }
+        navBufferLock.unlock()
+    }
+
+    func getRecentNavEvents() -> [XPNavEvent] {
+        navBufferLock.lock()
+        let events = navBuffer
+        navBufferLock.unlock()
+        return events
+    }
+
+    /// Snapshots the current screen as a downscaled JPEG for the LAN viewer's
+    /// Current tab. The UIKit snapshot must run on the main thread; the resize +
+    /// encode then run on the caller (an HTTP worker thread).
+    private func currentScreenJPEG() -> Data? {
+        let image: UIImage? = Thread.isMainThread
+            ? XPHierarchyCapture.captureFullScreenshotImage()
+            : DispatchQueue.main.sync { XPHierarchyCapture.captureFullScreenshotImage() }
+        guard let image, image.size.width > 0 else { return nil }
+
+        let maxWidth: CGFloat = 800
+        let scale = min(1, maxWidth / image.size.width)
+        if scale >= 1 { return image.jpegData(compressionQuality: 0.6) }
+        let target = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        let renderer = UIGraphicsImageRenderer(size: target)
+        let resized = renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: target)) }
+        return resized.jpegData(compressionQuality: 0.6)
     }
 
     private func sendAppInfo() {

@@ -202,7 +202,15 @@ public final class XPMonitoredSession: @unchecked Sendable {
 
     init(configuration: URLSessionConfiguration, capture: XPNetworkCapture) {
         self.capture = capture
-        self.collector = XPDataCollector(capture: capture)
+        // When auto-interception is active it injects XPURLProtocolInterceptor
+        // into the `.default`/`.ephemeral` configs a monitored session is built
+        // from — so the interceptor already captures every request here. Letting
+        // the delegate record too would log each request twice. Defer to the
+        // interceptor (it captures richer data: larger body limits + stream
+        // bodies) and only record from the delegate when no interceptor is in
+        // the config, so a monitored session is always captured exactly once.
+        let intercepted = (configuration.protocolClasses ?? []).contains { $0 == XPURLProtocolInterceptor.self }
+        self.collector = XPDataCollector(capture: capture, records: !intercepted)
         self.session = URLSession(configuration: configuration, delegate: collector, delegateQueue: nil)
     }
 
@@ -275,14 +283,19 @@ public final class XPMonitoredSession: @unchecked Sendable {
 
 private final class XPDataCollector: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private weak var capture: XPNetworkCapture?
+    /// False when an injected URLProtocol interceptor already records this
+    /// session's traffic — the delegate then only handles body/completion
+    /// plumbing and skips recording to avoid a duplicate entry.
+    private let records: Bool
 
     private let lock = NSLock()
     private var bodies: [Int: Data] = [:]
     private var completions: [Int: (Data?, URLResponse?, (any Error)?) -> Void] = [:]
     private var delays: [Int: Double] = [:]
 
-    init(capture: XPNetworkCapture) {
+    init(capture: XPNetworkCapture, records: Bool = true) {
         self.capture = capture
+        self.records = records
         super.init()
     }
 
@@ -327,6 +340,9 @@ private final class XPDataCollector: NSObject, URLSessionDataDelegate, @unchecke
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+        // An injected interceptor already recorded this request — don't duplicate.
+        guard records else { return }
+
         lock.lock()
         let body = bodies[task.taskIdentifier]
         lock.unlock()
