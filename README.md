@@ -1,6 +1,11 @@
 # XpectorKit
 
-The iOS SDK for [Xpector](https://github.com/arimunandar/xpector) — a real-time iOS debugging tool. Drop it into any app and instantly stream logs, network traffic, view hierarchy, navigation flow, performance metrics, and more to the Xpector Mac app.
+The iOS SDK for [Xpector](https://github.com/arimunandar/xpector) — a real-time iOS debugging tool. Drop it into any app and instantly stream logs, network traffic, view hierarchy, navigation flow, performance metrics, and more to the Xpector Mac app — **or** review them right inside your app with the built-in **on-device inspector** (no Mac required).
+
+Two ways to use it:
+
+1. **Mac app** — connect over USB/WiFi for the full inspector (hierarchy, automation, recording, remote viewing). See [Quick Start](#quick-start).
+2. **On-device inspector** — open a Wormholy-style panel inside your app to review Network, Logs, Leaks, and Storage on the device itself. See [On-Device Inspector](#on-device-inspector-no-mac-required).
 
 ## Installation
 
@@ -51,6 +56,50 @@ struct MyApp: App {
 
 UIKit works the same way — call `start(config:)` from
 `application(_:didFinishLaunchingWithOptions:)`.
+
+## On-Device Inspector (no Mac required)
+
+XpectorKit ships a **standalone in-app inspector** — a Wormholy-style panel you
+open right inside your app to review **Network**, **Logs**, **Leaks**, and
+**Storage** on the device itself. Ideal on a real device with no Mac attached,
+in TestFlight/QA builds, or for a quick look without wiring up the Mac app.
+
+Capture is already running (it starts with the server), so you only need to
+*present* the UI. Present it from anywhere — a debug menu, a hidden gesture, etc.:
+
+```swift
+import XpectorServer
+
+XpectorServer.shared.presentInspector()                 // opens on Network
+XpectorServer.shared.presentInspector(initialTab: .logs)
+```
+
+Or enable **shake-to-open** once at launch and shake the device to bring it up:
+
+```swift
+XpectorServer.shared.enableShakeToInspect()
+```
+
+What each tab shows:
+
+| Tab | Contents |
+|---|---|
+| **Network** | Every request — status/method, URL, headers, request & response bodies (pretty-printed, syntax-highlighted JSON), and copy / copy-as-cURL. |
+| **Logs** | Live `print` / `NSLog` / `os_log` / crash stream, filterable by level. Tap an entry for full detail. |
+| **Leaks** | View controllers that failed to deallocate, with instance counts. |
+| **Storage** | Current `UserDefaults` entries (toggle to hide system keys). |
+
+> The on-device inspector shows **full-fidelity** data — it's your own app on
+> your own device, so nothing leaves it. Secrets are redacted only when streaming
+> to a *remote* (Mac) inspector, never in the on-device view.
+
+### Crash reports across launches
+
+Crashes (uncaught exceptions and fatal signals) are persisted to disk by the
+crash handler, so after a crash the **next launch** surfaces a **`[Previous
+Crash]`** entry — with the signal name and a backtrace — in the **Logs** tab.
+Tap it for the full, copyable stack trace. (Capturing a crash requires running
+without the Xcode debugger attached, which otherwise intercepts the signal.)
 
 ## Enabling in non-Release configurations
 
@@ -305,6 +354,8 @@ XpectorKit/
 │       ├── XPHangDetector     # Main thread watchdog
 │       ├── XPCrashCapture     # Signals + exceptions
 │       ├── XPKeychainCapture  # Keychain items (DEBUG)
+│       ├── XPNetworkInspector # On-device inspector UI + present/shake
+│       ├── XPInspectorPanels  # Logs/Leaks/Storage panels + design system
 │       └── ...
 └── XpectorDemo/               # Demo app exercising all features
 ```

@@ -94,34 +94,41 @@ public final class XPNetworkCapture: @unchecked Sendable {
         return out
     }
 
-    public func record(_ entry: XPNetworkEntry) {
-        // Redact at the single choke point so every capture path (URLProtocol
-        // interceptor and monitored-session metrics) is covered.
-        let safe = XPNetworkEntry(
+    /// Returns a copy of `entry` with credentials/secrets masked. Applied on
+    /// every *egress* path to a remote inspector (live stream + `recentEntries`)
+    /// — the in-app buffer itself stays raw so the on-device inspector shows
+    /// full fidelity (the data never leaves the device, like Wormholy).
+    public static func redactedEntry(_ entry: XPNetworkEntry) -> XPNetworkEntry {
+        XPNetworkEntry(
             id: entry.id,
             url: entry.url,
             method: entry.method,
             statusCode: entry.statusCode,
-            requestHeaders: Self.redactHeaders(entry.requestHeaders),
-            responseHeaders: Self.redactHeaders(entry.responseHeaders),
-            requestBodyPreview: Self.redactBody(entry.requestBodyPreview),
-            responseBodyPreview: Self.redactBody(entry.responseBodyPreview),
+            requestHeaders: redactHeaders(entry.requestHeaders),
+            responseHeaders: redactHeaders(entry.responseHeaders),
+            requestBodyPreview: redactBody(entry.requestBodyPreview),
+            responseBodyPreview: redactBody(entry.responseBodyPreview),
             durationMs: entry.durationMs,
             bytesReceived: entry.bytesReceived,
             error: entry.error,
             timestamp: entry.timestamp
         )
+    }
 
+    public func record(_ entry: XPNetworkEntry) {
         lock.lock()
         guard _isCapturing else { lock.unlock(); return }
-        _buffer.append(safe)
+        // Store raw — egress paths (`onEntry`, `recentEntries`) redact instead.
+        _buffer.append(entry)
         if _buffer.count > Self.maxBufferSize {
             _buffer.removeFirst(_buffer.count - Self.maxBufferSize)
         }
         let callback = onEntry
+        let observers = Array(_observers.values)
         lock.unlock()
 
-        callback?(safe)
+        callback?(entry)
+        for observe in observers { observe(entry) }
     }
 
     func recentEntries(limit: Int = 50, domainFilter: String? = nil) -> [XPNetworkEntry] {
@@ -140,7 +147,49 @@ public final class XPNetworkCapture: @unchecked Sendable {
             entries = Array(entries.suffix(limit))
         }
 
-        return entries
+        // Redact on the way out to the remote inspector.
+        return entries.map { Self.redactedEntry($0) }
+    }
+
+    // MARK: - In-app inspector access (raw, on-device only)
+
+    private var _observers: [UUID: (XPNetworkEntry) -> Void] = [:]
+
+    /// Snapshot of all buffered requests, oldest first. Unredacted — for the
+    /// on-device inspector UI only.
+    public func liveEntries() -> [XPNetworkEntry] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _buffer
+    }
+
+    /// Register a callback fired (on the recording thread) for each new request.
+    /// Returns a token to pass to `removeObserver`.
+    @discardableResult
+    public func addObserver(_ callback: @escaping (XPNetworkEntry) -> Void) -> UUID {
+        let id = UUID()
+        lock.lock()
+        _observers[id] = callback
+        lock.unlock()
+        return id
+    }
+
+    public func removeObserver(_ id: UUID) {
+        lock.lock()
+        _observers.removeValue(forKey: id)
+        lock.unlock()
+    }
+
+    /// Ensure capture is on (no-op if already running). Lets the in-app
+    /// inspector work even if the host never started the full server.
+    public func ensureCapturing() {
+        start()
+    }
+
+    public func clearBuffer() {
+        lock.lock()
+        _buffer.removeAll()
+        lock.unlock()
     }
 }
 

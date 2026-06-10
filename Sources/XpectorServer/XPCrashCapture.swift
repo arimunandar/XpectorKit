@@ -22,6 +22,13 @@ private func xpBits(_ h: sig_t?) -> UInt {
     return unsafeBitCast(h, to: UInt.self)
 }
 
+/// Pre-allocated backtrace scratch so the signal handler never calls malloc.
+/// `backtrace`/`backtrace_symbols_fd` are async-signal-safe; the heap buffer is
+/// allocated once at install time, not inside the handler.
+private let xpBacktraceCapacity = 128
+private nonisolated(unsafe) let xpBacktraceBuffer: UnsafeMutablePointer<UnsafeMutableRawPointer?> =
+    UnsafeMutablePointer<UnsafeMutableRawPointer?>.allocate(capacity: xpBacktraceCapacity)
+
 final class XPCrashCapture: @unchecked Sendable {
     private let onCrash: (XPLogEntry) -> Void
     private static var sharedInstance: XPCrashCapture?
@@ -85,6 +92,13 @@ final class XPCrashCapture: @unchecked Sendable {
                     name.withUTF8Buffer { buf in
                         _ = Darwin.write(fd, buf.baseAddress, buf.count)
                     }
+                    // Append a backtrace (frames as "module address symbol +off").
+                    // Uses the pre-allocated buffer + the async-signal-safe
+                    // backtrace_symbols_fd, so no malloc runs in the handler.
+                    let frames = backtrace(xpBacktraceBuffer, Int32(xpBacktraceCapacity))
+                    if frames > 0 {
+                        backtrace_symbols_fd(xpBacktraceBuffer, frames, fd)
+                    }
                     Darwin.close(fd)
                     xpCrashFileDescriptor = -1
                 }
@@ -118,8 +132,14 @@ final class XPCrashCapture: @unchecked Sendable {
               let message = String(data: data, encoding: .utf8) else {
             return nil
         }
+        // install() pre-creates this file (empty) every launch so the signal
+        // handler can write to a ready fd. If the app then exits WITHOUT a
+        // caught crash, the file is still empty — that's not a crash, so don't
+        // report a content-less "[Previous Crash]". Always remove it either way.
         try? FileManager.default.removeItem(at: url)
-        return XPLogEntry(message: "[Previous Crash]\n\(message)", source: .crash, category: .crash)
+        let body = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return nil }
+        return XPLogEntry(message: "[Previous Crash]\n\(body)", source: .crash, category: .crash)
     }
 
     private static func saveCrashLogSafe(_ message: String) {

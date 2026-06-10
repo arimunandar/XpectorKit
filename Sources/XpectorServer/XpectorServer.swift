@@ -18,6 +18,9 @@ public final class XpectorServer: @unchecked Sendable {
     private var logCapture: XPLogCapture?
     private var osLogCapture: XPOSLogCapture?
     private var crashCapture: XPCrashCapture?
+    /// A crash recovered from the previous run — shown in the on-device
+    /// inspector immediately and sent to a remote inspector when one connects.
+    private var pendingCrash: XPLogEntry?
     private var userDefaultsMonitor: XPUserDefaultsMonitor?
     private var networkCapture: XPNetworkCapture?
     private var navigationCapture: XPNavigationCapture?
@@ -149,7 +152,7 @@ public final class XpectorServer: @unchecked Sendable {
             self.sendAppInfo()
             let welcome = XPLogEntry(message: "XpectorServer connected — log streaming active", source: .stdout, category: .info)
             self.send(entry: welcome)
-            if let pendingCrash = XPCrashCapture.checkPendingCrashLog() {
+            if let pendingCrash = self.pendingCrash {
                 self.send(entry: pendingCrash, type: .crash)
             }
         }
@@ -189,16 +192,29 @@ public final class XpectorServer: @unchecked Sendable {
         }
 
         logCapture = XPLogCapture { [weak self] entry in
+            XPInAppLogStore.shared.record(entry)
             self?.send(entry: entry)
         }
         logCapture?.start()
 
         crashCapture = XPCrashCapture { [weak self] entry in
+            XPInAppLogStore.shared.record(entry)
             self?.send(entry: entry, type: .crash)
         }
+
+        // Recover the previous run's crash BEFORE install() — install() truncates
+        // the crash-log file to arm it for the next crash, so reading must happen
+        // first or the prior crash content is wiped. Show it in the on-device
+        // inspector immediately, regardless of whether a remote inspector connects.
+        if let pending = XPCrashCapture.checkPendingCrashLog() {
+            XPInAppLogStore.shared.record(pending)
+            self.pendingCrash = pending
+        }
+
         crashCapture?.install()
 
         osLogCapture = XPOSLogCapture { [weak self] entry in
+            XPInAppLogStore.shared.record(entry)
             self?.send(entry: entry)
         }
         osLogCapture?.start()
@@ -211,7 +227,9 @@ public final class XpectorServer: @unchecked Sendable {
         if config.enableNetworkCapture {
             let network = XPNetworkCapture.shared
             network.onEntry = { [weak self] entry in
-                guard let msg = try? XPMessage(type: .networkEvent, content: entry) else { return }
+                // Redact on egress — the buffer is raw for the on-device inspector.
+                let safe = XPNetworkCapture.redactedEntry(entry)
+                guard let msg = try? XPMessage(type: .networkEvent, content: safe) else { return }
                 self?.broadcast(message: msg)
             }
             network.start()
@@ -236,6 +254,7 @@ public final class XpectorServer: @unchecked Sendable {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                 guard let self, self.isRunning else { return }
                 let perf = XPPerformanceCapture { [weak self] event in
+                    if event.type == .leak { XPInAppLeakStore.shared.record(event) }
                     guard let msg = try? XPMessage(type: .perfEvent, content: event) else { return }
                     self?.broadcast(message: msg)
                 }
@@ -271,6 +290,7 @@ public final class XpectorServer: @unchecked Sendable {
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.isRunning else { return }
                 let leak = XPLeakDetector(checkDelayMs: delayMs) { [weak self] event in
+                    XPInAppLeakStore.shared.record(event)
                     guard let msg = try? XPMessage(type: .perfEvent, content: event) else { return }
                     self?.broadcast(message: msg)
                 }
