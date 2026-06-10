@@ -40,15 +40,6 @@ final class XPNetworkInspectorStore: ObservableObject {
     }
 }
 
-// MARK: - JSON token palette
-
-private enum XPInspectorColor {
-    static let key = Color(red: 0.878, green: 0.424, blue: 0.459) // #e06c75
-    static let str = Color(red: 0.596, green: 0.765, blue: 0.475) // #98c379
-    static let num = Color(red: 0.820, green: 0.604, blue: 0.400) // #d19a66
-    static let lit = Color(red: 0.337, green: 0.714, blue: 0.761) // #56b6c2
-}
-
 // MARK: - List
 
 struct XPNetworkInspectorView: View {
@@ -122,8 +113,7 @@ struct XPNetworkEntryDetail: View {
     var body: some View {
         ZStack {
             XPTheme.bg.ignoresSafeArea()
-            ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(spacing: 12) {
                 XPCard {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 7) {
@@ -134,10 +124,7 @@ struct XPNetworkEntryDetail: View {
                                 .font(.system(size: 11, design: .monospaced)).foregroundColor(XPTheme.txt3)
                         }
                         Text(entry.url).font(.system(size: 12.5, design: .monospaced))
-                            .foregroundColor(XPTheme.txt).textSelection(.enabled)
-                        if let err = entry.error {
-                            Text(err).font(.system(size: 12)).foregroundColor(XPTheme.red)
-                        }
+                            .foregroundColor(XPTheme.txt).textSelection(.enabled).lineLimit(3)
                     }
                 }
 
@@ -149,38 +136,42 @@ struct XPNetworkEntryDetail: View {
                 }
                 .pickerStyle(.segmented)
 
-                switch tab {
-                case 0:
+                tabContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+        }
+        .navigationTitle("Request")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    // Body tabs fill the screen and render in a UITextView (fast + no truncation
+    // for large responses); Headers stay as cards in a normal scroll view.
+    @ViewBuilder private var tabContent: some View {
+        switch tab {
+        case 0:
+            ScrollView {
+                VStack(spacing: 12) {
+                    if let err = entry.error {
+                        XPCard { Text(err).font(.system(size: 12)).foregroundColor(XPTheme.red).frame(maxWidth: .infinity, alignment: .leading) }
+                    }
                     XPInspectorSection(title: "Request Headers", copyText: headerText(entry.requestHeaders)) {
                         XPHeaderList(headers: entry.requestHeaders)
                     }
                     XPInspectorSection(title: "Response Headers", copyText: headerText(entry.responseHeaders)) {
                         XPHeaderList(headers: entry.responseHeaders)
                     }
-                case 1:
-                    XPInspectorSection(title: "Request Body", copyText: entry.requestBodyPreview) {
-                        XPBodyView(bodyText: entry.requestBodyPreview)
-                    }
-                case 2:
-                    XPInspectorSection(title: "Response Body", copyText: entry.responseBodyPreview) {
-                        XPBodyView(bodyText: entry.responseBodyPreview)
-                    }
-                default:
-                    let curl = buildCurl(entry)
-                    XPInspectorSection(title: "cURL", copyText: curl) {
-                        Text(curl)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundColor(XPTheme.orange)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
                 }
+                .padding(.bottom, 16)
             }
-            .padding(16)
-            }
+        case 1:
+            XPBodyTab(title: "Request Body", text: entry.requestBodyPreview)
+        case 2:
+            XPBodyTab(title: "Response Body", text: entry.responseBodyPreview)
+        default:
+            XPBodyTab(title: "cURL", text: buildCurl(entry), isJSON: false, tint: XPTheme.orange)
         }
-        .navigationTitle("Request")
-        .navigationBarTitleDisplayMode(.inline)
     }
 
     private func headerText(_ headers: [String: String]) -> String? {
@@ -246,44 +237,99 @@ private struct XPHeaderList: View {
     }
 }
 
-private struct XPBodyView: View {
-    let bodyText: String?
+// MARK: - Body tab (UITextView-backed for speed + no truncation on large bodies)
+
+private struct XPBodyTab: View {
+    let title: String
+    let text: String?
+    var isJSON: Bool = true
+    var tint: Color? = nil
+    @State private var copied = false
+
     var body: some View {
-        if let text = bodyText, !text.isEmpty {
-            if XPInspectorJSON.isLikelyJSON(text) {
-                XPJSONView(json: XPInspectorJSON.pretty(text))
-            } else {
-                Text(text).font(.system(size: 11.5, design: .monospaced)).foregroundColor(XPTheme.txt).textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(title.uppercased()).font(.system(size: 10, weight: .semibold)).foregroundColor(XPTheme.txt3)
+                Spacer()
+                if let t = text, !t.isEmpty {
+                    Button {
+                        UIPasteboard.general.string = t
+                        copied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                    } label: {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(copied ? XPTheme.accent : XPTheme.txt2)
+                    }
+                }
             }
-        } else {
-            Text("Empty").font(.system(size: 12)).foregroundColor(XPTheme.txt3)
+            if let t = text, !t.isEmpty {
+                XPCodeView(source: t, isJSON: isJSON && XPInspectorJSON.isLikelyJSON(t), tint: tint)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(XPTheme.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(XPTheme.line, lineWidth: 1))
+            } else {
+                XPEmptyState(icon: "doc.text", text: "Empty")
+            }
+        }
+        .padding(.bottom, 12)
+    }
+}
+
+/// Renders code/JSON in a UITextView — native lazy glyph layout handles large
+/// bodies without the truncation/stutter of thousands of SwiftUI Text views.
+/// Highlighting is built off the main thread so opening the tab never blocks.
+private struct XPCodeView: View {
+    let source: String
+    let isJSON: Bool
+    var tint: Color? = nil
+    @State private var attributed: NSAttributedString?
+
+    var body: some View {
+        Group {
+            if let attributed {
+                XPTextViewRep(attributed: attributed)
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text("Formatting…").font(.system(size: 12)).foregroundColor(XPTheme.txt3)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .onAppear {
+            guard attributed == nil else { return }
+            let src = source
+            let json = isJSON
+            let fixed: UIColor? = tint.map { UIColor($0) }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = json
+                    ? XPInspectorJSON.attributedJSON(XPInspectorJSON.pretty(src))
+                    : XPInspectorJSON.attributedPlain(src, color: fixed)
+                DispatchQueue.main.async { self.attributed = result }
+            }
         }
     }
 }
 
-// MARK: - Postman-style JSON
-
-private struct XPJSONView: View {
-    let json: String
-    private var lines: [Substring] { json.split(separator: "\n", omittingEmptySubsequences: false) }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            ForEach(Array(lines.enumerated()), id: \.offset) { i, line in
-                HStack(alignment: .top, spacing: 8) {
-                    Text("\(i + 1)")
-                        .font(.system(size: 10.5, design: .monospaced))
-                        .foregroundColor(XPTheme.txt3)
-                        .frame(width: 26, alignment: .trailing)
-                    Text(XPInspectorJSON.highlight(String(line)))
-                        .font(.system(size: 11.5, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+private struct XPTextViewRep: UIViewRepresentable {
+    let attributed: NSAttributedString
+    func makeUIView(context: Context) -> UITextView {
+        let tv = UITextView()
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.isScrollEnabled = true
+        tv.backgroundColor = .clear
+        tv.textContainerInset = UIEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
+        tv.textContainer.lineFragmentPadding = 0
+        tv.alwaysBounceVertical = true
+        tv.indicatorStyle = .white
+        tv.contentInsetAdjustmentBehavior = .always
+        return tv
+    }
+    func updateUIView(_ tv: UITextView, context: Context) {
+        if tv.attributedText !== attributed { tv.attributedText = attributed }
     }
 }
 
@@ -321,30 +367,57 @@ private enum XPInspectorJSON {
         pattern: #"("(?:\\.|[^"\\])*"\s*:)|("(?:\\.|[^"\\])*")|\b(true|false|null)\b|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)"#
     )
 
-    static func highlight(_ line: String) -> AttributedString {
-        guard let regex else { return AttributedString(line) }
+    // UIColor palette + font for the UITextView renderer.
+    private static let codeFont = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    private static let cKey = UIColor(red: 0.878, green: 0.424, blue: 0.459, alpha: 1)
+    private static let cStr = UIColor(red: 0.596, green: 0.765, blue: 0.475, alpha: 1)
+    private static let cNum = UIColor(red: 0.820, green: 0.604, blue: 0.400, alpha: 1)
+    private static let cLit = UIColor(red: 0.337, green: 0.714, blue: 0.761, alpha: 1)
+    private static let cBase = UIColor(white: 0.93, alpha: 1)
+    private static let cLineNo = UIColor(white: 1, alpha: 0.30)
+
+    /// Line-numbered, syntax-highlighted attributed string. Built off the main
+    /// thread (large bodies); rendered in a UITextView.
+    static func attributedJSON(_ json: String) -> NSAttributedString {
+        let lines = json.components(separatedBy: "\n")
+        let width = max(2, String(lines.count).count)
+        let out = NSMutableAttributedString()
+        for (i, line) in lines.enumerated() {
+            out.append(NSAttributedString(string: String(format: "%\(width)d  ", i + 1),
+                                          attributes: [.font: codeFont, .foregroundColor: cLineNo]))
+            appendHighlighted(line, to: out)
+            out.append(NSAttributedString(string: "\n", attributes: [.font: codeFont, .foregroundColor: cBase]))
+        }
+        return out
+    }
+
+    static func attributedPlain(_ text: String, color: UIColor?) -> NSAttributedString {
+        NSAttributedString(string: text, attributes: [.font: codeFont, .foregroundColor: color ?? cBase])
+    }
+
+    private static func appendHighlighted(_ line: String, to out: NSMutableAttributedString) {
         let ns = line as NSString
-        var result = AttributedString()
+        guard let regex else {
+            out.append(NSAttributedString(string: line, attributes: [.font: codeFont, .foregroundColor: cBase]))
+            return
+        }
         var last = 0
         for m in regex.matches(in: line, range: NSRange(location: 0, length: ns.length)) {
-            let full = m.range
-            if full.location > last {
-                result += AttributedString(ns.substring(with: NSRange(location: last, length: full.location - last)))
+            if m.range.location > last {
+                out.append(NSAttributedString(string: ns.substring(with: NSRange(location: last, length: m.range.location - last)),
+                                              attributes: [.font: codeFont, .foregroundColor: cBase]))
             }
-            let color: Color
-            if m.range(at: 1).location != NSNotFound { color = XPInspectorColor.key }
-            else if m.range(at: 2).location != NSNotFound { color = XPInspectorColor.str }
-            else if m.range(at: 3).location != NSNotFound { color = XPInspectorColor.lit }
-            else { color = XPInspectorColor.num }
-            var seg = AttributedString(ns.substring(with: full))
-            seg.foregroundColor = color
-            result += seg
-            last = full.location + full.length
+            let color: UIColor = m.range(at: 1).location != NSNotFound ? cKey
+                : m.range(at: 2).location != NSNotFound ? cStr
+                : m.range(at: 3).location != NSNotFound ? cLit : cNum
+            out.append(NSAttributedString(string: ns.substring(with: m.range),
+                                          attributes: [.font: codeFont, .foregroundColor: color]))
+            last = m.range.location + m.range.length
         }
         if last < ns.length {
-            result += AttributedString(ns.substring(from: last))
+            out.append(NSAttributedString(string: ns.substring(from: last),
+                                          attributes: [.font: codeFont, .foregroundColor: cBase]))
         }
-        return result
     }
 }
 
