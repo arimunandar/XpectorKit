@@ -194,8 +194,12 @@ public final class XpectorServer: @unchecked Sendable {
         // same trust boundary as the WiFi server above.
         if config.enableLocalLogStream {
             let httpPort = conn.actualPort + 101
+            let appName = (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+                ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
+                ?? "App"
             let httpServer = XPHttpLogServer(
                 port: httpPort,
+                appName: appName,
                 recentLogs: { [weak self] in self?.getRecentLogEntries() ?? [] },
                 // Replay recent requests (redacted, like the live push) so a
                 // fresh viewer sees network history too.

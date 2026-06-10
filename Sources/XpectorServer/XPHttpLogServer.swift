@@ -14,6 +14,9 @@ import XpectorKit
 /// in Release. It is read-only — it never accepts commands.
 final class XPHttpLogServer: @unchecked Sendable {
     private let port: UInt16
+    /// Host app's display name, shown in the viewer header so the operator
+    /// knows which app they're looking at. Injected into the page at serve time.
+    private let appName: String
     private var serverFd: Int32 = -1
     private let lock = NSLock()
     /// Serializes writes to SSE clients; separate from `lock` so a slow socket
@@ -48,6 +51,7 @@ final class XPHttpLogServer: @unchecked Sendable {
 
     init(
         port: UInt16,
+        appName: String = "App",
         recentLogs: @escaping () -> [XPLogEntry],
         recentNetwork: @escaping () -> [XPNetworkEntry] = { [] },
         recentLeaks: @escaping () -> [XPPerfEvent] = { [] },
@@ -55,6 +59,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         currentScreenshot: @escaping () -> Data? = { nil }
     ) {
         self.port = port
+        self.appName = appName
         self.recentLogs = recentLogs
         self.recentNetwork = recentNetwork
         self.recentLeaks = recentLeaks
@@ -342,8 +347,18 @@ final class XPHttpLogServer: @unchecked Sendable {
         return alive
     }
 
+    /// Minimal HTML escaping for text injected into the page (the app name).
+    private static func htmlEscape(_ s: String) -> String {
+        s.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+    }
+
     private func serveHTML(_ fd: Int32) {
-        let body = Array(Self.viewerHTML.utf8)
+        let page = Self.viewerHTML.replacingOccurrences(
+            of: "__XP_APP_NAME__", with: Self.htmlEscape(appName))
+        let body = Array(page.utf8)
         let head = "HTTP/1.1 200 OK\r\n"
             + "Content-Type: text/html; charset=utf-8\r\n"
             + "Content-Length: \(body.count)\r\n"
@@ -373,7 +388,7 @@ final class XPHttpLogServer: @unchecked Sendable {
     <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Xpector — Live</title>
+    <title>__XP_APP_NAME__ — Xpector</title>
     <style>
       :root { color-scheme: dark; }
       * { box-sizing: border-box; }
@@ -397,7 +412,11 @@ final class XPHttpLogServer: @unchecked Sendable {
       }
       .tabs::-webkit-scrollbar { display: none; }
       .tab .ti { display: none; }   /* icons only appear in the mobile bottom bar */
-      header h1 { font-size: 14px; margin: 0 4px 0 0; font-weight: 600; color: #fff; flex: 0 0 auto; }
+      .brand { display: flex; align-items: center; gap: 8px; flex: 0 1 auto; min-width: 0; }
+      header h1 {
+        font-size: 14.5px; margin: 0; font-weight: 600; color: #fff; letter-spacing: .2px;
+        flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
       .tab {
         background: transparent; color: #8b929c; border: 0; padding: 6px 12px;
         border-radius: 6px; font: inherit; cursor: pointer; display: flex; align-items: center; gap: 6px;
@@ -406,29 +425,53 @@ final class XPHttpLogServer: @unchecked Sendable {
       .tab.active { background: #2a2f37; color: #fff; }
       .tab .count { background: #23272e; color: #b6bcc6; border-radius: 10px; padding: 0 6px; font-size: 11px; }
       .tab.active .count { background: #3a414c; }
-      .status { font-size: 12px; color: #8b929c; margin-left: 2px; }
-      .status.live::before { content: "●"; color: #3ddc84; margin-right: 5px; }
-      .status.down::before { content: "●"; color: #e5534b; margin-right: 5px; }
+      .status {
+        font-size: 11.5px; display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
+        padding: 4px 11px; border-radius: 99px; border: 1px solid transparent; white-space: nowrap;
+      }
+      .status::before { content: "●"; font-size: 8px; }
+      .status.live { color: #6fe0a3; background: rgba(61,220,132,.1); border-color: rgba(61,220,132,.25); }
+      .status.live::before { color: #3ddc84; }
+      .status.down { color: #f0a59e; background: rgba(229,83,75,.1); border-color: rgba(229,83,75,.25); }
+      .status.down::before { color: #e5534b; }
       .spacer { flex: 1 1 auto; }
+      .controls { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
       header input[type=text] {
         flex: 0 1 240px; min-width: 130px; background: #0d0f12; border: 1px solid #2a2f37;
-        color: #d6dae0; padding: 5px 9px; border-radius: 6px; font: inherit;
+        color: #d6dae0; padding: 7px 11px; border-radius: 8px; font: inherit; transition: border-color .15s;
       }
-      header label { font-size: 12px; color: #b6bcc6; display: flex; align-items: center; gap: 5px; cursor: pointer; }
+      header input[type=text]:focus { outline: none; border-color: #3a6fae; }
+      header input[type=text]::placeholder { color: #5d646e; }
+      header label { font-size: 12px; color: #9aa1ab; display: flex; align-items: center; gap: 7px; cursor: pointer; flex: 0 0 auto; }
       header select {
         background: #0d0f12; border: 1px solid #2a2f37; color: #d6dae0;
-        padding: 5px 9px; border-radius: 6px; font: inherit; max-width: 220px;
+        padding: 7px 11px; border-radius: 8px; font: inherit; max-width: 220px; cursor: pointer;
       }
+      /* autoscroll: a custom pill switch in place of the native checkbox */
+      #autoscroll {
+        appearance: none; -webkit-appearance: none; margin: 0; position: relative; flex: 0 0 auto;
+        width: 34px; height: 19px; background: #2a2f37; border-radius: 99px; cursor: pointer; transition: background .15s;
+      }
+      #autoscroll::after {
+        content: ""; position: absolute; top: 2px; left: 2px; width: 15px; height: 15px;
+        background: #8b929c; border-radius: 50%; transition: transform .15s, background .15s;
+      }
+      #autoscroll:checked { background: rgba(61,220,132,.28); }
+      #autoscroll:checked::after { transform: translateX(15px); background: #3ddc84; }
       /* the autoscroll toggle only applies to Logs; the host filter only to Network */
       body:not([data-tab="logs"]) #autoscrollLabel { display: none; }
       body:not([data-tab="net"]) #baseFilterLabel { display: none; }
-      /* the text filter is meaningless on the Current screen */
-      body[data-tab="screen"] #filter { display: none; }
+      /* the text filter + clear are meaningless on the Current screen */
+      body[data-tab="screen"] #filter,
+      body[data-tab="screen"] #clear { display: none; }
       header button.act {
-        background: #2a2f37; color: #d6dae0; border: 0; padding: 5px 10px;
-        border-radius: 6px; font: inherit; cursor: pointer;
+        background: #20242b; color: #b6bcc6; border: 1px solid #2a2f37; padding: 6px 13px;
+        border-radius: 8px; font: inherit; cursor: pointer; flex: 0 0 auto; transition: background .15s, color .15s;
       }
-      header button.act:hover { background: #353b45; }
+      header button.act:hover { background: #2a2f37; color: #fff; }
+      .act-icon { display: inline-flex; align-items: center; justify-content: center; padding: 7px; }
+      .act-icon svg { width: 16px; height: 16px; }
+      #clear:hover { color: #ff6b61; border-color: rgba(255,107,97,.4); }
 
       .view { flex: 1 1 auto; min-height: 0; overflow: hidden; }
       .view.hidden { display: none; }
@@ -603,11 +646,22 @@ final class XPHttpLogServer: @unchecked Sendable {
 
       /* ---- Mobile ---- */
       @media (max-width: 680px) {
-        header { gap: 7px; padding: 8px 10px; border-bottom: 1px solid #23272e; }
+        header { gap: 9px; padding: 10px 12px; border-bottom: 1px solid #23272e; }
+        header h1 { font-size: 13.5px; }
+        /* brand + status on the top row; the host filter + controls each drop to
+           their own full-width row, edge-to-edge, so nothing looks half-sized. */
         .spacer { display: none; }
-        header h1 { font-size: 13px; }
-        #filter { flex: 1 1 100%; order: 9; }   /* full-width on its own line */
-        header select, .act { padding: 8px 11px; }
+        .controls { flex: 1 1 100%; gap: 9px; }
+        #filter { flex: 1 1 auto; }
+        #baseFilterLabel { flex: 1 1 100%; }
+        #baseFilterLabel select { flex: 1 1 auto; width: 100%; max-width: none; padding: 10px 12px; }
+        header select { flex: 0 0 auto; padding: 9px 11px; }
+        .act { padding: 9px 13px; }
+        .act-icon { padding: 9px; }
+        .act-icon svg { width: 18px; height: 18px; }
+        #autoscroll { width: 38px; height: 22px; }
+        #autoscroll::after { width: 18px; height: 18px; }
+        #autoscroll:checked::after { transform: translateX(16px); }
 
         /* Tabs become a sticky bottom navigation bar (it's the last flex item in
            a non-scrolling 100dvh column, so it's always pinned to the bottom). */
@@ -657,13 +711,17 @@ final class XPHttpLogServer: @unchecked Sendable {
     <body>
       <header>
         <div class="hrow-main">
-          <h1>Xpector</h1>
+          <div class="brand">
+            <h1 id="appName">__XP_APP_NAME__</h1>
+          </div>
           <span id="status" class="status down">connecting…</span>
-          <span class="spacer"></span>
-          <label id="baseFilterLabel"><select id="baseFilter"><option value="">All hosts</option></select></label>
-          <input id="filter" type="text" placeholder="filter logs…" autocomplete="off" spellcheck="false">
           <label id="autoscrollLabel"><input id="autoscroll" type="checkbox" checked> autoscroll</label>
-          <button class="act" id="clear">clear</button>
+          <label id="baseFilterLabel"><select id="baseFilter"><option value="">All hosts</option></select></label>
+          <span class="spacer"></span>
+          <div class="controls">
+            <input id="filter" type="text" placeholder="filter logs…" autocomplete="off" spellcheck="false">
+            <button class="act act-icon" id="clear" title="Clear" aria-label="Clear"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3"/></svg></button>
+          </div>
         </div>
       </header>
       <nav class="tabs">
