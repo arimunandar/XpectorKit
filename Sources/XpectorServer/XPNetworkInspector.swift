@@ -438,17 +438,26 @@ enum XPInspectorPresenter {
     static func installShakeSwizzleOnce() {
         guard !didSwizzle else { return }
         didSwizzle = true
-        let cls = UIWindow.self
+        // Swizzle on UIResponder (where `motionEnded` and `xp_motionEnded` both
+        // live) — NOT UIWindow. Resolving `motionEnded` via UIWindow returns the
+        // inherited UIResponder method, so exchanging it affects all responders;
+        // if `xp_motionEnded` only existed on UIWindow, a non-window responder
+        // (a host VC forwarding the event) would hit an unrecognized selector.
+        let cls = UIResponder.self
         guard let original = class_getInstanceMethod(cls, #selector(UIResponder.motionEnded(_:with:))),
-              let swizzled = class_getInstanceMethod(cls, #selector(UIWindow.xp_motionEnded(_:with:))) else { return }
+              let swizzled = class_getInstanceMethod(cls, #selector(UIResponder.xp_motionEnded(_:with:))) else { return }
         method_exchangeImplementations(original, swizzled)
     }
 }
 
-extension UIWindow {
+extension UIResponder {
     @objc func xp_motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
+        // Defined on UIResponder so the selector exists on every responder
+        // (the event may be delivered to a view/VC, not just the window).
+        // present() dedupes, so firing from each responder in the chain still
+        // shows the inspector exactly once per shake.
         if XPInspectorPresenter.shakeEnabled, motion == .motionShake {
-            XpectorServer.shared.presentNetworkInspector()
+            XpectorServer.shared.presentInspector()
         }
         // After exchange this calls the original implementation.
         xp_motionEnded(motion, with: event)

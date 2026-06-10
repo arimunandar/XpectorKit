@@ -10,6 +10,10 @@ struct XpectorDemoApp: App {
         // (In plain DEBUG builds this is optional — the package auto-starts.)
         XpectorServer.shared.startForDevelopment()
         #endif
+
+        // Shake the device (Simulator: Device ▸ Shake, ⌃⌘Z) to open the
+        // on-device inspector — Network · Logs · Leaks · Storage.
+        XpectorServer.shared.enableShakeToInspect()
     }
 
     var body: some Scene {
