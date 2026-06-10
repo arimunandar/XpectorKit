@@ -28,9 +28,20 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
     private var peerChannels: [XP_PTChannel] = []
     private let queue = DispatchQueue(label: "com.xpector.transport")
 
+    /// Guards `channel` / `peerChannel` / `peerChannels`. These are mutated from
+    /// Peertalk's dispatch-queue delegate callbacks while `send`/`reply`/
+    /// `isConnected`/`disconnect` read them from arbitrary threads (log capture,
+    /// crash handlers, the main thread). `Array` is not thread-safe, so without
+    /// this lock concurrent append/removeAll during iteration can crash the host.
+    private let stateLock = NSLock()
+
     public var isConnected: Bool {
-        if let peerChannel { return peerChannel.isConnected }
-        return peerChannels.contains { $0.isConnected }
+        stateLock.lock()
+        let single = peerChannel
+        let peers = peerChannels
+        stateLock.unlock()
+        if let single { return single.isConnected }
+        return peers.contains { $0.isConnected }
     }
 
     public override init() {
@@ -47,10 +58,14 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
                 self.delegate?.transport(self, didFailWithError: error)
                 return
             }
+            self.stateLock.lock()
             self.peerChannel = ch
+            self.stateLock.unlock()
             self.delegate?.transport(self, didChangeState: true)
         }
+        stateLock.lock()
         channel = ch
+        stateLock.unlock()
     }
 
     // MARK: - Client (macOS side) - Connect over USB
@@ -63,10 +78,14 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
                 self.delegate?.transport(self, didFailWithError: error)
                 return
             }
+            self.stateLock.lock()
             self.peerChannel = ch
+            self.stateLock.unlock()
             self.delegate?.transport(self, didChangeState: true)
         }
+        stateLock.lock()
         channel = ch
+        stateLock.unlock()
     }
 
     // MARK: - Server (iOS side) - Listen on a port
@@ -80,7 +99,9 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
                 self.delegate?.transport(self, didFailWithError: error)
             }
         }
+        stateLock.lock()
         channel = ch
+        stateLock.unlock()
     }
 
     @discardableResult
@@ -100,7 +121,9 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
                 bindError = error
             }
             if bindError == nil {
+                stateLock.lock()
                 channel = ch
+                stateLock.unlock()
                 return port
             }
         }
@@ -133,15 +156,21 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
     public func send(message: XPMessage) throws {
         let nsData = message.payload as NSData
 
+        // Snapshot the peer set under the lock, then perform I/O outside it.
+        stateLock.lock()
+        let single = peerChannel
+        let peers = peerChannels
+        stateLock.unlock()
+
         // Client mode: single outbound peer.
-        if let target = peerChannel, target.isConnected {
+        if let target = single, target.isConnected {
             let payload = nsData.createReferencingDispatchData()
             target.sendFrame(ofType: message.type.rawValue, tag: 0, withPayload: payload, callback: nil)
             return
         }
 
         // Server mode: broadcast to every connected peer (Mac app, CLI, etc.).
-        let connectedPeers = peerChannels.filter { $0.isConnected }
+        let connectedPeers = peers.filter { $0.isConnected }
         guard !connectedPeers.isEmpty else {
             throw XPTransportError.notConnected
         }
@@ -155,11 +184,16 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
     /// broadcast if the peer is unknown. Used for request/response so responses
     /// don't cross-talk between concurrent clients.
     public func reply(message: XPMessage, to peer: XPPeerID?) throws {
-        if let peer, let target = peerChannels.first(where: { ObjectIdentifier($0) == peer }) {
-            guard target.isConnected else { throw XPTransportError.notConnected }
-            let payload = (message.payload as NSData).createReferencingDispatchData()
-            target.sendFrame(ofType: message.type.rawValue, tag: 0, withPayload: payload, callback: nil)
-            return
+        if let peer {
+            stateLock.lock()
+            let target = peerChannels.first(where: { ObjectIdentifier($0) == peer })
+            stateLock.unlock()
+            if let target {
+                guard target.isConnected else { throw XPTransportError.notConnected }
+                let payload = (message.payload as NSData).createReferencingDispatchData()
+                target.sendFrame(ofType: message.type.rawValue, tag: 0, withPayload: payload, callback: nil)
+                return
+            }
         }
         try send(message: message)
     }
@@ -167,12 +201,15 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
     // MARK: - Disconnect
 
     public func disconnect() {
+        stateLock.lock()
         let peer = peerChannel
         let peers = peerChannels
         let ch = channel
         peerChannel = nil
         peerChannels = []
         channel = nil
+        stateLock.unlock()
+
         peer?.close()
         peers.forEach { $0.close() }
         ch?.close()
@@ -199,10 +236,12 @@ extension XPTransportChannel: XP_PTChannelDelegate {
     }
 
     public func ioFrameChannel(_ channel: XP_PTChannel, didEndWithError error: (any Error)?) {
+        stateLock.lock()
         if channel === peerChannel {
             peerChannel = nil
         }
         peerChannels.removeAll { $0 === channel }
+        stateLock.unlock()
         delegate?.transport(self, didChangeState: false)
     }
 
@@ -211,7 +250,9 @@ extension XPTransportChannel: XP_PTChannelDelegate {
         // This lets the Mac app, CLI, and transient scan handshakes coexist
         // without kicking each other off.
         otherChannel.delegate = self
+        stateLock.lock()
         peerChannels.append(otherChannel)
+        stateLock.unlock()
         delegate?.transport(self, didChangeState: true)
     }
 }

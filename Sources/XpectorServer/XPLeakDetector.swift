@@ -56,11 +56,14 @@ final class XPLeakDetector: @unchecked Sendable {
         XPLeakDetector.originalViewDidDisappear = method_getImplementation(method)
 
         let block: @convention(block) (UIViewController, Bool) -> Void = { vc, animated in
-            let original = unsafeBitCast(
-                XPLeakDetector.originalViewDidDisappear!,
-                to: (@convention(c) (UIViewController, Selector, Bool) -> Void).self
-            )
-            original(vc, sel, animated)
+            if let originalIMP = XPLeakDetector.originalViewDidDisappear {
+                let original = unsafeBitCast(
+                    originalIMP,
+                    to: (@convention(c) (UIViewController, Selector, Bool) -> Void).self
+                )
+                original(vc, sel, animated)
+            }
+            // No-op when capture is stopped (activeInstance is nil).
             XPLeakDetector.activeInstance?.handleViewDidDisappear(vc)
         }
         method_setImplementation(method, imp_implementationWithBlock(block))

@@ -48,8 +48,13 @@ final class XPHangDetector: @unchecked Sendable {
         }
 
         responded = false
+        // Hop to the main thread to prove it's alive, then bounce back to the
+        // watchdog queue to flip the flag — so `responded` is only ever touched
+        // on `watchdogQueue` and there's no data race with `check()`. If the main
+        // thread is hung, the inner async never runs and the next check fires.
         DispatchQueue.main.async { [weak self] in
-            self?.responded = true
+            guard let self else { return }
+            self.watchdogQueue.async { self.responded = true }
         }
     }
 }

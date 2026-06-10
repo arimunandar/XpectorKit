@@ -34,6 +34,9 @@ final class XPNotificationCapture: @unchecked Sendable {
         "AX",
     ]
 
+    // Rate-limit counters are touched from every thread that posts a
+    // notification, so they need their own lock.
+    private static let rateLimitLock = NSLock()
     private static var eventCount = 0
     private static var windowStart: Date = Date()
 
@@ -82,13 +85,16 @@ final class XPNotificationCapture: @unchecked Sendable {
         let rawName = name.rawValue
 
         // Rate limiting — max 50 events per second
+        rateLimitLock.lock()
         let now = Date()
         if now.timeIntervalSince(windowStart) > 1.0 {
             eventCount = 0
             windowStart = now
         }
         eventCount += 1
-        if eventCount > 50 { return }
+        let overLimit = eventCount > 50
+        rateLimitLock.unlock()
+        if overLimit { return }
 
         // Check blocklist
         for prefix in blockedPrefixes {

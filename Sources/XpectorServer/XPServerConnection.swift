@@ -165,14 +165,16 @@ extension XPServerConnection: XPTransportDelegate {
 
         case .requestContext:
             let request = (try? message.decode(XPContextRequest.self)) ?? XPContextRequest()
+            // Compute the keychain summary off the main thread — SecItemCopyMatching
+            // across all classes can be slow and may trigger synchronous auth.
+            let keychainSummary: [String: Int]
+            #if DEBUG
+            keychainSummary = XpectorServer.shared.getKeychainCapture()?.summaryCounts() ?? [:]
+            #else
+            keychainSummary = [:]
+            #endif
             DispatchQueue.main.async { [weak self] in
                 let server = XpectorServer.shared
-                let keychainSummary: [String: Int]
-                #if DEBUG
-                keychainSummary = server.getKeychainCapture()?.summaryCounts() ?? [:]
-                #else
-                keychainSummary = [:]
-                #endif
                 let snapshot = XPContextCapture.capture(
                     request: request,
                     networkCapture: server.getNetworkCapture(),

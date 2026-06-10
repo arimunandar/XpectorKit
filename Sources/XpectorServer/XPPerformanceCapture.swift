@@ -19,6 +19,10 @@ final class XPPerformanceCapture: @unchecked Sendable {
     private var peakMemoryBytes: UInt64 = 0
     private var startTime: Date?
 
+    /// Guards the counters that the CADisplayLink writes on the main thread and
+    /// `currentSummary()` reads from the request-handler queue.
+    private let counterLock = NSLock()
+
     init(onEvent: @escaping (XPPerfEvent) -> Void) {
         self.onEvent = onEvent
     }
@@ -53,17 +57,24 @@ final class XPPerformanceCapture: @unchecked Sendable {
     func currentSummary() -> XPPerfSummary {
         let memBytes = currentMemoryFootprint()
         let memMB = Double(memBytes) / (1024.0 * 1024.0)
-        let peakMB = Double(peakMemoryBytes) / (1024.0 * 1024.0)
         let uptime = startTime.map { Date().timeIntervalSince($0) } ?? 0
-        let avgFPS = fpsSnapshots > 0 ? fpsAccumulator / Double(fpsSnapshots) : currentFPS
+
+        counterLock.lock()
+        let peakMB = Double(peakMemoryBytes) / (1024.0 * 1024.0)
+        let curFPS = currentFPS
+        // Time-weighted average: total frames over elapsed time, not a mean of
+        // per-frame instantaneous FPS (which over-weights fast frames).
+        let avgFPS = uptime > 0 && frameCount > 0 ? Double(frameCount) / uptime : currentFPS
+        let dropped = droppedFrameCount
+        counterLock.unlock()
 
         return XPPerfSummary(
-            currentFPS: currentFPS,
+            currentFPS: curFPS,
             avgFPS: avgFPS,
             memoryUsageMB: memMB,
             peakMemoryMB: peakMB,
             recentHangCount: 0,
-            droppedFrames: droppedFrameCount,
+            droppedFrames: dropped,
             uptimeSeconds: uptime
         )
     }
@@ -71,6 +82,9 @@ final class XPPerformanceCapture: @unchecked Sendable {
     // MARK: - CADisplayLink
 
     private func createDisplayLink() {
+        // stop() may have run before this async block; don't install a link that
+        // would retain self and keep firing forever after we've been stopped.
+        guard isRunning else { return }
         let link = CADisplayLink(target: self, selector: #selector(displayLinkFired(_:)))
         link.add(to: .main, forMode: .common)
         displayLink = link
@@ -84,6 +98,7 @@ final class XPPerformanceCapture: @unchecked Sendable {
             let frameDuration = timestamp - lastTimestamp
             let expectedDuration = link.targetTimestamp - link.timestamp
 
+            counterLock.lock()
             if frameDuration > 0 {
                 currentFPS = 1.0 / frameDuration
                 fpsAccumulator += currentFPS
@@ -92,9 +107,10 @@ final class XPPerformanceCapture: @unchecked Sendable {
 
             frameCount += 1
 
-            if frameDuration > expectedDuration * 2.0 {
+            if expectedDuration > 0 && frameDuration > expectedDuration * 2.0 {
                 droppedFrameCount += 1
             }
+            counterLock.unlock()
         }
 
         lastTimestamp = timestamp
@@ -115,9 +131,11 @@ final class XPPerformanceCapture: @unchecked Sendable {
 
         if result == KERN_SUCCESS {
             let footprint = UInt64(info.phys_footprint)
+            counterLock.lock()
             if footprint > peakMemoryBytes {
                 peakMemoryBytes = footprint
             }
+            counterLock.unlock()
             return footprint
         }
         return 0

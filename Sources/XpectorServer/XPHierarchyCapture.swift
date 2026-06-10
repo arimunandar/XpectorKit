@@ -5,7 +5,10 @@ final class XPHierarchyCapture {
     private static var viewRegistry = NSMapTable<NSUUID, UIView>.strongToWeakObjects()
 
     static func lookupView(_ id: UUID) -> UIView? {
-        viewRegistry.object(forKey: id as NSUUID)
+        // The registry is mutated on the main thread by `capture`; reads must be
+        // on the main thread too (NSMapTable is not thread-safe).
+        dispatchPrecondition(condition: .onQueue(.main))
+        return viewRegistry.object(forKey: id as NSUUID)
     }
 
     static func capture(request: XPHierarchyRequest = XPHierarchyRequest()) -> XPHierarchySnapshot {
@@ -63,10 +66,15 @@ final class XPHierarchyCapture {
         return data
     }
 
+    /// Guards against stack overflow on pathological/cyclic view trees in
+    /// arbitrary host apps. Real UIKit hierarchies are far shallower than this.
+    private static let maxDepth = 200
+
     private static func captureView(
         _ view: UIView,
         parentFrameToRoot: XPRect,
-        request: XPHierarchyRequest
+        request: XPHierarchyRequest,
+        depth: Int = 0
     ) -> XPViewNode {
         let nodeID = UUID()
         viewRegistry.setObject(view, forKey: nodeID as NSUUID)
@@ -111,8 +119,8 @@ final class XPHierarchyCapture {
         let navInfo = extractNavigationInfo(for: view, viewController: vc)
         let swiftUIType = extractSwiftUIType(from: view)
 
-        let children = view.subviews.map { subview in
-            captureView(subview, parentFrameToRoot: frameToRoot, request: request)
+        let children: [XPViewNode] = depth >= maxDepth ? [] : view.subviews.map { subview in
+            captureView(subview, parentFrameToRoot: frameToRoot, request: request, depth: depth + 1)
         }
 
         return XPViewNode(
@@ -316,6 +324,14 @@ final class XPHierarchyCapture {
         let savedStates: [(UIView, Bool)] = view.subviews.map { ($0, $0.isHidden) }
         view.subviews.forEach { $0.isHidden = true }
 
+        // Restore the live view tree no matter how we exit this scope, so a
+        // throwing/early-returning renderer can never leave host subviews hidden.
+        defer {
+            for (subview, wasHidden) in savedStates {
+                subview.isHidden = wasHidden
+            }
+        }
+
         let renderer = UIGraphicsImageRenderer(
             size: size,
             format: {
@@ -328,11 +344,6 @@ final class XPHierarchyCapture {
 
         let data = renderer.jpegData(withCompressionQuality: 0.7) { ctx in
             view.layer.render(in: ctx.cgContext)
-        }
-
-        // Restore by identity
-        for (subview, wasHidden) in savedStates {
-            subview.isHidden = wasHidden
         }
 
         return data

@@ -12,14 +12,32 @@ final class XPURLProtocolInterceptor: URLProtocol, @unchecked Sendable {
 
     private static let forwardingSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
+        // Belt-and-suspenders: ensure the forwarding session can never re-enter
+        // this interceptor (even if the .ephemeral getter swizzle injected us),
+        // which would recurse on every forwarded request.
+        config.protocolClasses = []
         return URLSession(configuration: config)
     }()
 
     // MARK: - Swizzle URLSessionConfiguration to inject into ALL sessions
 
     private static var hasSwizzled = false
+    private static var origDefaultIMP: IMP?
+    private static var origEphemeralIMP: IMP?
+
+    /// When false, `canInit` refuses every request so the SDK is fully inert
+    /// after `stop()` — even for session configs that were injected while it was
+    /// running. Guarded by `activeLock` since it's read on arbitrary URL-loading
+    /// threads and written from the server lifecycle.
+    private static let activeLock = NSLock()
+    private static var _isActive = false
+    static var isActive: Bool {
+        get { activeLock.lock(); defer { activeLock.unlock() }; return _isActive }
+        set { activeLock.lock(); defer { activeLock.unlock() }; _isActive = newValue }
+    }
 
     static func installSessionConfigSwizzle() {
+        isActive = true
         guard !hasSwizzled else { return }
         hasSwizzled = true
 
@@ -35,6 +53,8 @@ final class XPURLProtocolInterceptor: URLProtocol, @unchecked Sendable {
 
         let origDefault = method_getImplementation(defaultGetter)
         let origEphemeral = method_getImplementation(ephemeralGetter)
+        origDefaultIMP = origDefault
+        origEphemeralIMP = origEphemeral
 
         typealias ConfigGetter = @convention(c) (AnyObject, Selector) -> URLSessionConfiguration
 
@@ -58,6 +78,29 @@ final class XPURLProtocolInterceptor: URLProtocol, @unchecked Sendable {
         method_setImplementation(ephemeralGetter, imp_implementationWithBlock(swizzledEphemeral))
     }
 
+    /// Restore the original config getters and mark the interceptor inert so the
+    /// host app's traffic is no longer re-routed once the SDK stops.
+    static func uninstallSessionConfigSwizzle() {
+        isActive = false
+        guard hasSwizzled else { return }
+
+        if let defaultGetter = class_getClassMethod(
+            URLSessionConfiguration.self,
+            #selector(getter: URLSessionConfiguration.default)
+        ), let orig = origDefaultIMP {
+            method_setImplementation(defaultGetter, orig)
+        }
+        if let ephemeralGetter = class_getClassMethod(
+            URLSessionConfiguration.self,
+            #selector(getter: URLSessionConfiguration.ephemeral)
+        ), let orig = origEphemeralIMP {
+            method_setImplementation(ephemeralGetter, orig)
+        }
+        hasSwizzled = false
+        origDefaultIMP = nil
+        origEphemeralIMP = nil
+    }
+
     private static func inject(into config: URLSessionConfiguration) {
         var protocols = config.protocolClasses ?? []
         if !protocols.contains(where: { $0 == XPURLProtocolInterceptor.self }) {
@@ -69,6 +112,9 @@ final class XPURLProtocolInterceptor: URLProtocol, @unchecked Sendable {
     // MARK: - URLProtocol
 
     override class func canInit(with request: URLRequest) -> Bool {
+        // Inert once stopped: don't re-route host traffic even through configs
+        // that were injected while capture was active.
+        guard isActive else { return false }
         if URLProtocol.property(forKey: handledKey, in: request) != nil { return false }
         guard let scheme = request.url?.scheme?.lowercased() else { return false }
         return scheme == "http" || scheme == "https"

@@ -462,8 +462,17 @@ final class XPAttributeBuilder {
     private static func imageViewGroup(_ imageView: UIImageView) -> XPAttributeGroup {
         var attrs: [XPAttribute] = []
         if let image = imageView.image {
+            // `assetName` is a private/undocumented key on UIImageAsset. Probe
+            // with `responds(to:)` first — calling value(forKey:) on a key that
+            // doesn't exist raises NSUnknownKeyException, which is uncatchable in
+            // Swift and would crash the host app on a future iOS version.
+            let assetName: String? = {
+                guard let asset = image.imageAsset,
+                      asset.responds(to: NSSelectorFromString("assetName")) else { return nil }
+                return asset.value(forKey: "assetName") as? String
+            }()
             let name = image.accessibilityIdentifier
-                ?? image.imageAsset?.value(forKey: "assetName") as? String
+                ?? assetName
                 ?? "(unnamed)"
             attrs.append(.init(id: "imageView.imageName", title: "Image Name", type: .string,
                                value: .string(name), isEditable: false))

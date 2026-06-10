@@ -30,8 +30,14 @@ final class XPBonjourPublisher: NSObject, @unchecked Sendable {
     }
 
     func stop() {
-        netService?.stop()
-        netService = nil
+        // The service was scheduled on the main run loop in start(); tear it down
+        // there too, fully unscheduling and clearing the delegate.
+        DispatchQueue.main.async { [self] in
+            netService?.stop()
+            netService?.remove(from: .main, forMode: .common)
+            netService?.delegate = nil
+            netService = nil
+        }
     }
 }
 

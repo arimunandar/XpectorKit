@@ -53,6 +53,47 @@ public final class XPNetworkCapture: @unchecked Sendable {
         return out
     }
 
+    /// Field names whose values are credentials/secrets and must be masked when
+    /// they appear in request/response body previews (JSON values or form fields).
+    private static let sensitiveBodyKeys = [
+        "password", "passwd", "pwd", "secret", "token", "access_token",
+        "refresh_token", "id_token", "api_key", "apikey", "authorization",
+        "client_secret", "private_key", "session", "otp", "pin",
+    ]
+
+    private static let bodyRedactionRules: [(regex: NSRegularExpression, template: String)] = {
+        var rules: [(NSRegularExpression, String)] = []
+        for key in sensitiveBodyKeys {
+            let escaped = NSRegularExpression.escapedPattern(for: key)
+            // JSON string value:  "key" : "value"  ->  keep the quotes, mask value
+            if let r = try? NSRegularExpression(
+                pattern: "(\"\(escaped)\"\\s*:\\s*\")[^\"]*(\")",
+                options: [.caseInsensitive]) {
+                rules.append((r, "$1<redacted>$2"))
+            }
+            // Form / query field:  key=value  ->  keep the key, mask value
+            if let r = try? NSRegularExpression(
+                pattern: "(\\b\(escaped)=)[^&\\s\"]*",
+                options: [.caseInsensitive]) {
+                rules.append((r, "$1<redacted>"))
+            }
+        }
+        return rules
+    }()
+
+    /// Masks the values of sensitive fields inside a captured body preview so
+    /// passwords/tokens/secrets in JSON or form payloads aren't exposed to an
+    /// inspector on the LAN.
+    static func redactBody(_ body: String?) -> String? {
+        guard var out = body, !out.isEmpty else { return body }
+        for rule in bodyRedactionRules {
+            let range = NSRange(out.startIndex..<out.endIndex, in: out)
+            out = rule.regex.stringByReplacingMatches(
+                in: out, options: [], range: range, withTemplate: rule.template)
+        }
+        return out
+    }
+
     public func record(_ entry: XPNetworkEntry) {
         // Redact at the single choke point so every capture path (URLProtocol
         // interceptor and monitored-session metrics) is covered.
@@ -63,8 +104,8 @@ public final class XPNetworkCapture: @unchecked Sendable {
             statusCode: entry.statusCode,
             requestHeaders: Self.redactHeaders(entry.requestHeaders),
             responseHeaders: Self.redactHeaders(entry.responseHeaders),
-            requestBodyPreview: entry.requestBodyPreview,
-            responseBodyPreview: entry.responseBodyPreview,
+            requestBodyPreview: Self.redactBody(entry.requestBodyPreview),
+            responseBodyPreview: Self.redactBody(entry.responseBodyPreview),
             durationMs: entry.durationMs,
             bytesReceived: entry.bytesReceived,
             error: entry.error,

@@ -279,6 +279,11 @@ public final class XpectorServer: @unchecked Sendable {
         snapshot.udMonitor?.stop()
 
         URLProtocol.unregisterClass(XPURLProtocolInterceptor.self)
+        // Revert the config-getter swizzle and stop re-routing host traffic, and
+        // clear any throttle profile so the host app's networking returns to
+        // normal once the inspector disconnects.
+        XPURLProtocolInterceptor.uninstallSessionConfigSwizzle()
+        XPNetworkThrottleManager.shared.reset()
         snapshot.network?.stop()
         snapshot.network?.onEntry = nil
 
@@ -345,14 +350,16 @@ public final class XpectorServer: @unchecked Sendable {
 
         case .requestContext:
             let request = (try? message.decode(XPContextRequest.self)) ?? XPContextRequest()
+            // Compute the keychain summary off the main thread — SecItemCopyMatching
+            // across all classes can be slow and may trigger synchronous auth.
+            let keychainSummary: [String: Int]
+            #if DEBUG
+            keychainSummary = getKeychainCapture()?.summaryCounts() ?? [:]
+            #else
+            keychainSummary = [:]
+            #endif
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                let keychainSummary: [String: Int]
-                #if DEBUG
-                keychainSummary = self.getKeychainCapture()?.summaryCounts() ?? [:]
-                #else
-                keychainSummary = [:]
-                #endif
                 let snapshot = XPContextCapture.capture(
                     request: request,
                     networkCapture: self.getNetworkCapture(),

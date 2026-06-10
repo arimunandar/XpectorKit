@@ -19,8 +19,10 @@ final class XPNavigationCapture: @unchecked Sendable {
     private static var originalViewDidAppear: IMP?
     private static var originalDismiss: IMP?
 
-    // Track nav stack depth per UINavigationController to distinguish push vs pop
-    private static var navStackDepths: [ObjectIdentifier: Int] = [:]
+    // Track nav stack depth per UINavigationController to distinguish push vs pop.
+    // Weak keys so entries auto-evict when a nav controller deallocates — avoids
+    // unbounded growth and stale ObjectIdentifier reuse misclassifying push/pop.
+    private static let navStackDepths = NSMapTable<UINavigationController, NSNumber>.weakToStrongObjects()
 
     private static var lastScreenshotTime: CFAbsoluteTime = 0
 
@@ -64,7 +66,7 @@ final class XPNavigationCapture: @unchecked Sendable {
         guard isCapturing else { return }
         isCapturing = false
         XPNavigationCapture.activeInstance = nil
-        XPNavigationCapture.navStackDepths.removeAll()
+        XPNavigationCapture.navStackDepths.removeAllObjects()
         XPNavigationCapture.didEmitInitialScreen = false
     }
 
@@ -219,6 +221,11 @@ final class XPNavigationCapture: @unchecked Sendable {
                 )
                 original(vc, #selector(UIViewController.viewDidAppear(_:)), animated)
 
+                // The swizzle can't be cleanly removed, so when capture is stopped
+                // make the trampoline a near-no-op: bail before doing any work or
+                // scheduling an async hop on every VC appearance in the host app.
+                guard XPNavigationCapture.activeInstance != nil else { return }
+
                 // Capture transient state synchronously (isBeingPresented resets after this call)
                 let context = AppearContext(vc: vc)
 
@@ -237,6 +244,17 @@ final class XPNavigationCapture: @unchecked Sendable {
             XPNavigationCapture.originalDismiss = method_getImplementation(originalMethod)
 
             let swizzledBlock: @convention(block) (UIViewController, Bool, (() -> Void)?) -> Void = { vc, animated, completion in
+                let original = unsafeBitCast(
+                    XPNavigationCapture.originalDismiss!,
+                    to: (@convention(c) (UIViewController, Selector, Bool, (() -> Void)?) -> Void).self
+                )
+
+                // When capture is stopped, pass straight through with zero overhead.
+                guard XPNavigationCapture.activeInstance != nil else {
+                    original(vc, dismissSelector, animated, completion)
+                    return
+                }
+
                 // Determine the presenting VC name before dismiss happens
                 let fromVC: String?
                 if let presented = vc.presentedViewController {
@@ -247,11 +265,6 @@ final class XPNavigationCapture: @unchecked Sendable {
 
                 let toVC = vc.presentingViewController.map { XPNavigationCapture.vcDisplayName($0) }
 
-                // Call original
-                let original = unsafeBitCast(
-                    XPNavigationCapture.originalDismiss!,
-                    to: (@convention(c) (UIViewController, Selector, Bool, (() -> Void)?) -> Void).self
-                )
                 original(vc, dismissSelector, animated, {
                     completion?()
 
@@ -318,10 +331,9 @@ final class XPNavigationCapture: @unchecked Sendable {
             let event = XPNavEvent(type: .present, fromVC: fromVC, toVC: vcName, screenshot: thumbnail)
             instance.onEvent(event)
         } else if let nav = context.navController {
-            let navId = ObjectIdentifier(nav)
-            let previousDepth = navStackDepths[navId] ?? 0
+            let previousDepth = navStackDepths.object(forKey: nav)?.intValue ?? 0
             let currentDepth = context.navStackCount
-            navStackDepths[navId] = currentDepth
+            navStackDepths.setObject(NSNumber(value: currentDepth), forKey: nav)
 
             if currentDepth > previousDepth && currentDepth > 1 {
                 let previousVC = context.previousStackVC.map { vcDisplayName($0) }
