@@ -4,6 +4,11 @@ import XpectorKit
 final class XPHierarchyCapture {
     private static var viewRegistry = NSMapTable<NSUUID, UIView>.strongToWeakObjects()
 
+    /// Image encoding (JPEG/PNG compression) is the expensive half of a
+    /// hierarchy snapshot; it runs here so the main thread only pays for
+    /// traversal and rasterization.
+    static let encodeQueue = DispatchQueue(label: "com.xpector.hierarchy.encode", qos: .userInitiated)
+
     static func lookupView(_ id: UUID) -> UIView? {
         // The registry is mutated on the main thread by `capture`; reads must be
         // on the main thread too (NSMapTable is not thread-safe).
@@ -11,13 +16,20 @@ final class XPHierarchyCapture {
         return viewRegistry.object(forKey: id as NSUUID)
     }
 
-    static func capture(request: XPHierarchyRequest = XPHierarchyRequest()) -> XPHierarchySnapshot {
+    /// Two-phase capture: traversal + per-node rasterization on the main
+    /// thread, then JPEG encoding and tree injection on `encodeQueue`. The
+    /// completion is invoked on `encodeQueue`.
+    static func capture(
+        request: XPHierarchyRequest = XPHierarchyRequest(),
+        completion: @escaping (XPHierarchySnapshot) -> Void
+    ) {
         dispatchPrecondition(condition: .onQueue(.main))
         viewRegistry.removeAllObjects()
 
         let screenBounds = UIScreen.main.bounds
         let screenSize = XPRect(screenBounds)
 
+        var pendingImages: [UUID: UIImage] = [:]
         var windowNodes: [XPViewNode] = []
         for scene in UIApplication.shared.connectedScenes {
             guard let windowScene = scene as? UIWindowScene else { continue }
@@ -25,20 +37,45 @@ final class XPHierarchyCapture {
                 let node = captureView(
                     window,
                     parentFrameToRoot: .zero,
-                    request: request
+                    request: request,
+                    pendingImages: &pendingImages
                 )
                 windowNodes.append(node)
             }
         }
 
-        return XPHierarchySnapshot(
-            timestamp: Date(),
-            screenSize: screenSize,
-            windows: windowNodes
-        )
+        let timestamp = Date()
+        let images = pendingImages
+        encodeQueue.async {
+            var encoded: [UUID: Data] = [:]
+            encoded.reserveCapacity(images.count)
+            for (id, image) in images {
+                encoded[id] = image.jpegData(compressionQuality: 0.7)
+            }
+            var windows = windowNodes
+            if !encoded.isEmpty {
+                for i in windows.indices {
+                    injectScreenshots(into: &windows[i], encoded: encoded)
+                }
+            }
+            completion(XPHierarchySnapshot(
+                timestamp: timestamp,
+                screenSize: screenSize,
+                windows: windows
+            ))
+        }
     }
 
-    static func captureFullScreenshot() -> Data? {
+    private static func injectScreenshots(into node: inout XPViewNode, encoded: [UUID: Data]) {
+        if let data = encoded[node.id] {
+            node.screenshot = data
+        }
+        for i in node.children.indices {
+            injectScreenshots(into: &node.children[i], encoded: encoded)
+        }
+    }
+
+    static func captureFullScreenshotImage() -> UIImage? {
         dispatchPrecondition(condition: .onQueue(.main))
 
         guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
@@ -59,11 +96,16 @@ final class XPHierarchyCapture {
             }()
         )
 
-        let data = renderer.pngData { ctx in
+        return renderer.image { ctx in
             window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
         }
+    }
 
-        return data
+    /// Synchronous variant for callers that need the encoded bytes inline
+    /// (context snapshots, navigation thumbnails). Prefer
+    /// `captureFullScreenshotImage()` + off-main encoding on request paths.
+    static func captureFullScreenshot() -> Data? {
+        captureFullScreenshotImage()?.pngData()
     }
 
     /// Guards against stack overflow on pathological/cyclic view trees in
@@ -74,7 +116,8 @@ final class XPHierarchyCapture {
         _ view: UIView,
         parentFrameToRoot: XPRect,
         request: XPHierarchyRequest,
-        depth: Int = 0
+        depth: Int = 0,
+        pendingImages: inout [UUID: UIImage]
     ) -> XPViewNode {
         let nodeID = UUID()
         viewRegistry.setObject(view, forKey: nodeID as NSUUID)
@@ -86,13 +129,14 @@ final class XPHierarchyCapture {
         let frameToRootY = frame.y - Double(view.superview?.bounds.origin.y ?? 0) + parentFrameToRoot.y
         let frameToRoot = XPRect(x: frameToRootX, y: frameToRootY, width: frame.width, height: frame.height)
 
-        var screenshot: Data? = nil
         if request.includeScreenshots && frame.width > 0 && frame.height > 0 {
-            screenshot = captureSoloScreenshot(
+            if let image = rasterizeSoloImage(
                 of: view,
                 scale: request.maxScreenshotScale,
                 maxDimension: request.maxScreenshotDimension
-            )
+            ) {
+                pendingImages[nodeID] = image
+            }
         }
 
         let vc = findViewController(for: view)
@@ -119,8 +163,18 @@ final class XPHierarchyCapture {
         let navInfo = extractNavigationInfo(for: view, viewController: vc)
         let swiftUIType = extractSwiftUIType(from: view)
 
-        let children: [XPViewNode] = depth >= maxDepth ? [] : view.subviews.map { subview in
-            captureView(subview, parentFrameToRoot: frameToRoot, request: request, depth: depth + 1)
+        var children: [XPViewNode] = []
+        if depth < maxDepth {
+            children.reserveCapacity(view.subviews.count)
+            for subview in view.subviews {
+                children.append(captureView(
+                    subview,
+                    parentFrameToRoot: frameToRoot,
+                    request: request,
+                    depth: depth + 1,
+                    pendingImages: &pendingImages
+                ))
+            }
         }
 
         return XPViewNode(
@@ -134,7 +188,7 @@ final class XPHierarchyCapture {
             isUserInteractionEnabled: view.isUserInteractionEnabled,
             accessibilityIdentifier: view.accessibilityIdentifier,
             viewControllerClassName: vcClassName,
-            screenshot: screenshot,
+            screenshot: nil,
             children: children,
             accessibilityLabel: view.accessibilityLabel,
             accessibilityValue: view.accessibilityValue,
@@ -304,14 +358,18 @@ final class XPHierarchyCapture {
         scale: Double,
         maxDimension: Int
     ) -> Data? {
-        captureSoloScreenshot(of: view, scale: scale, maxDimension: maxDimension)
+        rasterizeSoloImage(of: view, scale: scale, maxDimension: maxDimension)?
+            .jpegData(compressionQuality: 0.7)
     }
 
-    private static func captureSoloScreenshot(
+    /// Rasterizes the view *without its subviews* into a UIImage. Must run on
+    /// the main thread (it temporarily hides subviews); the resulting image is
+    /// immutable and safe to encode on a background queue.
+    private static func rasterizeSoloImage(
         of view: UIView,
         scale: Double,
         maxDimension: Int
-    ) -> Data? {
+    ) -> UIImage? {
         let size = view.bounds.size
         guard size.width > 0 && size.height > 0 else { return nil }
 
@@ -342,17 +400,15 @@ final class XPHierarchyCapture {
             }()
         )
 
-        let data = renderer.jpegData(withCompressionQuality: 0.7) { ctx in
+        return renderer.image { ctx in
             view.layer.render(in: ctx.cgContext)
         }
-
-        return data
     }
 
-    static func captureGroupScreenshot(
+    static func captureGroupScreenshotImage(
         of view: UIView,
         scale: Double? = nil
-    ) -> Data? {
+    ) -> UIImage? {
         dispatchPrecondition(condition: .onQueue(.main))
         let size = view.bounds.size
         guard size.width > 0 && size.height > 0 else { return nil }
@@ -370,7 +426,7 @@ final class XPHierarchyCapture {
             }()
         )
 
-        let data = renderer.pngData { ctx in
+        return renderer.image { ctx in
             UIColor.white.setFill()
             ctx.fill(CGRect(origin: .zero, size: size))
             let drawn = view.drawHierarchy(in: view.bounds, afterScreenUpdates: false)
@@ -378,8 +434,6 @@ final class XPHierarchyCapture {
                 view.layer.render(in: ctx.cgContext)
             }
         }
-
-        return data
     }
 
     private static func findViewController(for view: UIView) -> UIViewController? {

@@ -32,6 +32,11 @@ public final class XpectorServer: @unchecked Sendable {
     private var keychainCapture: XPKeychainCapture?
     #endif
     private var isRunning = false
+    /// True when the running instance was started by the zero-code auto-start
+    /// (DEBUG load-time constructor) rather than an explicit host call. A later
+    /// explicit `start(config:)` then restarts with the host's configuration
+    /// instead of being silently ignored.
+    private var wasAutoStarted = false
     private var config = XPConfiguration()
     private let stateQueue = DispatchQueue(label: "com.xpector.server.state")
 
@@ -73,13 +78,43 @@ public final class XpectorServer: @unchecked Sendable {
     }
 
     public func start(config: XPConfiguration) {
-        let shouldStart: Bool = stateQueue.sync {
-            guard !isRunning else { return false }
+        start(config: config, isAutoStart: false)
+    }
+
+    /// Entry point for the DEBUG zero-code auto-start. No-op if the host
+    /// already started the server manually.
+    func startAutomatically() {
+        start(config: XPConfiguration(), isAutoStart: true)
+    }
+
+    func start(config: XPConfiguration, isAutoStart: Bool) {
+        enum StartAction { case proceed, skip, restartWithNewConfig }
+        let action: StartAction = stateQueue.sync {
+            if isRunning {
+                // Auto-start ran with defaults, host now wants its own config:
+                // honor the host. Everything else: already running, ignore.
+                if !isAutoStart && wasAutoStarted { return .restartWithNewConfig }
+                return .skip
+            }
             isRunning = true
+            wasAutoStarted = isAutoStart
             self.config = config
-            return true
+            return .proceed
         }
-        guard shouldStart else { return }
+        switch action {
+        case .skip:
+            return
+        case .restartWithNewConfig:
+            stop()
+            start(config: config, isAutoStart: false)
+            return
+        case .proceed:
+            break
+        }
+
+        if isAutoStart {
+            print("[Xpector] Auto-started (zero-code DEBUG integration — set XPECTOR_DISABLED=1 to opt out)")
+        }
 
         // Fail closed in Release builds: the server exposes app internals over an
         // unauthenticated socket, so it must never run for shipped end users
@@ -118,6 +153,9 @@ public final class XpectorServer: @unchecked Sendable {
                 self.send(entry: pendingCrash, type: .crash)
             }
         }
+        conn.onConnectionStateChanged = { [weak self] _ in
+            self?.updateCaptureCadence()
+        }
         conn.start()
         connection = conn
         cachedConnection = conn
@@ -130,8 +168,13 @@ public final class XpectorServer: @unchecked Sendable {
             guard let self else { return }
             self.handleWiFiMessage(message, from: clientFd, server: wifi)
         }
+        wifi.onClientChange = { [weak self] _ in
+            self?.updateCaptureCadence()
+        }
         wifi.start()
         wifiServer = wifi
+
+        warnIfWiFiDiscoveryMisconfigured()
 
         let publisher = XPBonjourPublisher(port: wifiPort)
         publisher.start()
@@ -334,6 +377,9 @@ public final class XpectorServer: @unchecked Sendable {
             guard let self else { return }
             self.handleWiFiMessage(message, from: clientFd, server: wifi)
         }
+        wifi.onClientChange = { [weak self] _ in
+            self?.updateCaptureCadence()
+        }
         wifi.start()
         wifiServer = wifi
 
@@ -343,27 +389,23 @@ public final class XpectorServer: @unchecked Sendable {
     }
 
     private func handleWiFiMessage(_ message: XPMessage, from clientFd: Int32, server: XPWiFiServer) {
+        let tag = message.tag
         switch message.type {
         case .ping:
             XPNetworkThrottleManager.shared.reset()
-            let info = XPAppInfo(
-                appName: Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Unknown",
-                bundleID: Bundle.main.bundleIdentifier ?? "unknown",
-                deviceType: deviceType(),
-                serverVersion: XPConstants.protocolVersion,
-                deviceName: UIDevice.current.name,
-                buildConfig: Self.currentBuildConfig
-            )
-            if let msg = try? XPMessage(type: .pong, content: info) {
+            if let msg = try? XPMessage(type: .pong, content: makeAppInfo(), tag: tag) {
                 server.send(message: msg, to: clientFd)
             }
 
         case .requestHierarchy:
             let request = (try? message.decode(XPHierarchyRequest.self)) ?? XPHierarchyRequest()
             DispatchQueue.main.async {
-                let snapshot = XPHierarchyCapture.capture(request: request)
-                if let msg = try? XPMessage(type: .hierarchyData, content: snapshot) {
-                    server.send(message: msg, to: clientFd)
+                XPHierarchyCapture.capture(request: request) { snapshot in
+                    // Runs on the capture encode queue — JSON encoding of a
+                    // multi-megabyte snapshot stays off the main thread.
+                    if let msg = try? XPMessage(type: .hierarchyData, content: snapshot, tag: tag) {
+                        server.send(message: msg, to: clientFd)
+                    }
                 }
             }
 
@@ -386,7 +428,7 @@ public final class XpectorServer: @unchecked Sendable {
                     keychainSummary: keychainSummary,
                     logEntries: self.getRecentLogEntries()
                 )
-                if let msg = try? XPMessage(type: .contextData, content: snapshot) {
+                if let msg = try? XPMessage(type: .contextData, content: snapshot, tag: tag) {
                     server.send(message: msg, to: clientFd)
                 }
             }
@@ -394,7 +436,7 @@ public final class XpectorServer: @unchecked Sendable {
         case .requestNavState:
             DispatchQueue.main.async {
                 let state = XPNavigationCapture.captureCurrentState()
-                if let msg = try? XPMessage(type: .navStateData, content: state) {
+                if let msg = try? XPMessage(type: .navStateData, content: state, tag: tag) {
                     server.send(message: msg, to: clientFd)
                 }
             }
@@ -402,28 +444,28 @@ public final class XpectorServer: @unchecked Sendable {
         case .requestPerfSummary:
             let summary = getPerformanceCapture()?.currentSummary()
                 ?? XPPerfSummary(currentFPS: 0, avgFPS: 0, memoryUsageMB: 0, peakMemoryMB: 0, recentHangCount: 0, droppedFrames: 0, uptimeSeconds: 0)
-            if let msg = try? XPMessage(type: .perfSummaryData, content: summary) {
+            if let msg = try? XPMessage(type: .perfSummaryData, content: summary, tag: tag) {
                 server.send(message: msg, to: clientFd)
             }
 
         case .requestUserDefaults:
             let snapshot = getUserDefaultsCapture()?.captureSnapshot()
                 ?? XPUserDefaultsSnapshot(entries: [])
-            if let msg = try? XPMessage(type: .userDefaultsSnapshotData, content: snapshot) {
+            if let msg = try? XPMessage(type: .userDefaultsSnapshotData, content: snapshot, tag: tag) {
                 server.send(message: msg, to: clientFd)
             }
 
         case .requestRecentNetwork:
             let request = (try? message.decode(XPRecentNetworkRequest.self)) ?? XPRecentNetworkRequest()
             let entries = getNetworkCapture()?.recentEntries(limit: request.limit, domainFilter: request.domainFilter) ?? []
-            if let msg = try? XPMessage(type: .recentNetworkData, content: entries) {
+            if let msg = try? XPMessage(type: .recentNetworkData, content: entries, tag: tag) {
                 server.send(message: msg, to: clientFd)
             }
 
         case .setNetworkCondition:
             guard let request = try? message.decode(XPNetworkConditionRequest.self) else {
                 let ack = XPNetworkConditionAck(success: false, activeProfile: XPNetworkThrottleManager.shared.activeProfile.rawValue)
-                if let msg = try? XPMessage(type: .networkConditionAck, content: ack) {
+                if let msg = try? XPMessage(type: .networkConditionAck, content: ack, tag: tag) {
                     server.send(message: msg, to: clientFd)
                 }
                 return
@@ -431,7 +473,7 @@ public final class XpectorServer: @unchecked Sendable {
             let profile = XPNetworkProfile(rawValue: request.profile) ?? .wifi
             XPNetworkThrottleManager.shared.setProfile(profile)
             let ack = XPNetworkConditionAck(success: true, activeProfile: profile.rawValue)
-            if let msg = try? XPMessage(type: .networkConditionAck, content: ack) {
+            if let msg = try? XPMessage(type: .networkConditionAck, content: ack, tag: tag) {
                 server.send(message: msg, to: clientFd)
             }
 
@@ -480,16 +522,75 @@ public final class XpectorServer: @unchecked Sendable {
     }
 
     private func sendAppInfo() {
-        let info = XPAppInfo(
+        guard let message = try? XPMessage(type: .appInfo, content: makeAppInfo()) else { return }
+        cachedConnection?.send(message: message)
+    }
+
+    /// Single source of truth for the handshake payload (pong + appInfo, both
+    /// transports). `protocolVersion`/`capabilities` are the 1.1 handshake:
+    /// clients feature-gate on the capability list instead of guessing from
+    /// version strings, and a missing list means a 1.0 peer.
+    func makeAppInfo() -> XPAppInfo {
+        XPAppInfo(
             appName: Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Unknown",
             bundleID: Bundle.main.bundleIdentifier ?? "unknown",
             deviceType: deviceType(),
             serverVersion: XPConstants.protocolVersion,
             deviceName: UIDevice.current.name,
-            buildConfig: Self.currentBuildConfig
+            buildConfig: Self.currentBuildConfig,
+            protocolVersion: XPConstants.protocolVersion,
+            capabilities: Self.serverCapabilities
         )
-        guard let message = try? XPMessage(type: .appInfo, content: info) else { return }
-        cachedConnection?.send(message: message)
+    }
+
+    static var serverCapabilities: [String] {
+        var caps = [
+            "tagCorrelation",
+            "hierarchy", "nodeDetail", "modifyAttribute", "screenshot",
+            "network", "throttling",
+            "navigation", "context",
+            "logs", "crash", "perf",
+            "userDefaults", "threads",
+        ]
+        #if DEBUG
+        caps.append("keychain")
+        #endif
+        return caps
+    }
+
+    /// Scale polling-based captures to whether anyone is actually watching:
+    /// tight cadence while a peer is connected, relaxed when idle.
+    private func updateCaptureCadence() {
+        let active = (connection?.hasConnectedPeer ?? false) || (wifiServer?.hasClient ?? false)
+        osLogCapture?.setActivePolling(active)
+    }
+
+    /// WiFi discovery silently fails without these Info.plist entries; print
+    /// one actionable, copy-pasteable warning instead. USB and Simulator
+    /// connections work without any Info.plist changes, so this is a warning,
+    /// not an error. The simulator doesn't enforce local-network privacy.
+    private func warnIfWiFiDiscoveryMisconfigured() {
+        #if !targetEnvironment(simulator)
+        let bundle = Bundle.main
+        let hasUsageDescription = bundle.object(forInfoDictionaryKey: "NSLocalNetworkUsageDescription") != nil
+        let bonjourServices = bundle.object(forInfoDictionaryKey: "NSBonjourServices") as? [String] ?? []
+        let hasBonjourService = bonjourServices.contains { $0.hasPrefix("_xpector._tcp") }
+        guard !hasUsageDescription || !hasBonjourService else { return }
+
+        var missing: [String] = []
+        if !hasUsageDescription { missing.append("NSLocalNetworkUsageDescription") }
+        if !hasBonjourService { missing.append("NSBonjourServices (_xpector._tcp)") }
+        print("""
+        [Xpector] WiFi discovery is disabled: \(missing.joined(separator: " and ")) missing from Info.plist.
+        [Xpector] USB connections work without this. To enable WiFi, add to Info.plist:
+        [Xpector]   <key>NSLocalNetworkUsageDescription</key>
+        [Xpector]   <string>Xpector connects to the Mac debugging tool over the local network.</string>
+        [Xpector]   <key>NSBonjourServices</key>
+        [Xpector]   <array>
+        [Xpector]       <string>_xpector._tcp</string>
+        [Xpector]   </array>
+        """)
+        #endif
     }
 
     private static var currentBuildConfig: String {

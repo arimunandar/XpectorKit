@@ -7,6 +7,7 @@ struct XpectorDemoApp: App {
         #if XPECTOR_ENABLED
         // startForDevelopment() opts non-DEBUG configs (e.g. Staging) in.
         // The #if strips this entirely from Release, where XPECTOR_ENABLED is undefined.
+        // (In plain DEBUG builds this is optional — the package auto-starts.)
         XpectorServer.shared.startForDevelopment()
         #endif
     }

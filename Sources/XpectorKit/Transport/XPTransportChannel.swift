@@ -165,7 +165,7 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
         // Client mode: single outbound peer.
         if let target = single, target.isConnected {
             let payload = nsData.createReferencingDispatchData()
-            target.sendFrame(ofType: message.type.rawValue, tag: 0, withPayload: payload, callback: nil)
+            target.sendFrame(ofType: message.type.rawValue, tag: message.tag, withPayload: payload, callback: nil)
             return
         }
 
@@ -176,7 +176,7 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
         }
         for peer in connectedPeers {
             let payload = nsData.createReferencingDispatchData()
-            peer.sendFrame(ofType: message.type.rawValue, tag: 0, withPayload: payload, callback: nil)
+            peer.sendFrame(ofType: message.type.rawValue, tag: message.tag, withPayload: payload, callback: nil)
         }
     }
 
@@ -191,7 +191,7 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
             if let target {
                 guard target.isConnected else { throw XPTransportError.notConnected }
                 let payload = (message.payload as NSData).createReferencingDispatchData()
-                target.sendFrame(ofType: message.type.rawValue, tag: 0, withPayload: payload, callback: nil)
+                target.sendFrame(ofType: message.type.rawValue, tag: message.tag, withPayload: payload, callback: nil)
                 return
             }
         }
@@ -231,7 +231,7 @@ extension XPTransportChannel: XP_PTChannelDelegate {
             return
         }
 
-        let message = XPMessage(type: messageType, payload: data)
+        let message = XPMessage(type: messageType, payload: data, tag: tag)
         delegate?.transport(self, didReceiveMessage: message, from: ObjectIdentifier(channel))
     }
 

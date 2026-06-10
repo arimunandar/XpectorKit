@@ -6,9 +6,15 @@ final class XPWiFiServer: @unchecked Sendable {
     private var serverFd: Int32 = -1
     private var clientFd: Int32 = -1
     private let lock = NSLock()
+    /// Serializes frame writes; separate from `lock` so slow socket writes
+    /// never block state reads (accept loop, hasClient).
+    private let writeLock = NSLock()
     private var running = false
 
     var onMessage: ((XPMessage, Int32) -> Void)?
+    /// Fired when a client connects (true) or the last client drops (false),
+    /// so the server can scale capture cadence to whether anyone is watching.
+    var onClientChange: ((Bool) -> Void)?
 
     /// Maximum accepted size for an inbound (command) frame. Requests are tiny
     /// JSON; this bounds per-connection memory for an unauthenticated peer.
@@ -19,6 +25,12 @@ final class XPWiFiServer: @unchecked Sendable {
     }
 
     var actualPort: UInt16 { port }
+
+    var hasClient: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return clientFd >= 0
+    }
 
     func start() {
         lock.lock()
@@ -44,25 +56,24 @@ final class XPWiFiServer: @unchecked Sendable {
     }
 
     func send(message: XPMessage, to fd: Int32) {
-        let type = message.type.rawValue
-        let payload = message.payload
-        var header = [UInt8](repeating: 0, count: 16)
-        withUnsafeBytes(of: UInt32(1).bigEndian) { header.replaceSubrange(0..<4, with: $0) }
-        withUnsafeBytes(of: type.bigEndian) { header.replaceSubrange(4..<8, with: $0) }
-        withUnsafeBytes(of: UInt32(0).bigEndian) { header.replaceSubrange(8..<12, with: $0) }
-        withUnsafeBytes(of: UInt32(payload.count).bigEndian) { header.replaceSubrange(12..<16, with: $0) }
+        let frame = XPWireFrame.encode(message: message)
 
         lock.lock()
         let target = fd >= 0 ? fd : clientFd
         lock.unlock()
         guard target >= 0 else { return }
 
-        header.withUnsafeBufferPointer { buf in
-            _ = Darwin.send(target, buf.baseAddress!, 16, 0)
-        }
-        if !payload.isEmpty {
-            payload.withUnsafeBytes { buf in
-                _ = Darwin.send(target, buf.baseAddress!, payload.count, 0)
+        // Frames are written from several threads (request replies, log/perf
+        // broadcasts). Serialize the whole frame and retry partial sends —
+        // interleaved or truncated writes desync the client's frame parser.
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        frame.withUnsafeBytes { buf in
+            var sent = 0
+            while sent < frame.count {
+                let n = Darwin.send(target, buf.baseAddress! + sent, frame.count - sent, 0)
+                guard n > 0 else { return }
+                sent += n
             }
         }
     }
@@ -130,6 +141,7 @@ final class XPWiFiServer: @unchecked Sendable {
             if old >= 0 { close(old) }
 
             print("[Xpector WiFi] Client connected")
+            onClientChange?(true)
             Thread.detachNewThread { [weak self] in
                 self?.handleClient(cfd)
             }
@@ -145,47 +157,43 @@ final class XPWiFiServer: @unchecked Sendable {
 
             guard let frame = readFrame(fd) else { break }
 
-            if let type = XPMessageType(rawValue: frame.type) {
-                let message = XPMessage(type: type, payload: frame.payload)
+            if let type = XPMessageType(rawValue: frame.header.type) {
+                let message = XPMessage(type: type, payload: frame.payload, tag: frame.header.tag)
                 onMessage?(message, fd)
             }
         }
 
         lock.lock()
-        if clientFd == fd { clientFd = -1 }
+        let wasCurrent = clientFd == fd
+        if wasCurrent { clientFd = -1 }
         lock.unlock()
         close(fd)
         print("[Xpector WiFi] Client disconnected")
+        if wasCurrent { onClientChange?(false) }
     }
 
     private struct RawFrame {
-        let type: UInt32
+        let header: XPWireFrame.Header
         let payload: Data
     }
 
     private func readFrame(_ fd: Int32) -> RawFrame? {
-        var header = [UInt8](repeating: 0, count: 16)
-        guard readExact(fd, &header, 16) else { return nil }
-
-        let type = UInt32(bigEndian: header.withUnsafeBufferPointer {
-            $0.baseAddress!.advanced(by: 4).withMemoryRebound(to: UInt32.self, capacity: 1) { $0.pointee }
-        })
-        let size = UInt32(bigEndian: header.withUnsafeBufferPointer {
-            $0.baseAddress!.advanced(by: 12).withMemoryRebound(to: UInt32.self, capacity: 1) { $0.pointee }
-        })
+        var headerBytes = [UInt8](repeating: 0, count: XPWireFrame.headerSize)
+        guard readExact(fd, &headerBytes, XPWireFrame.headerSize),
+              let header = XPWireFrame.decodeHeader(headerBytes) else { return nil }
 
         var payload = Data()
         // Inbound frames are small command requests; cap the declared size so an
         // unauthenticated peer can't force a large allocation per connection.
-        if size > 0 && size <= Self.maxInboundFrameBytes {
-            var buf = [UInt8](repeating: 0, count: Int(size))
-            guard readExact(fd, &buf, Int(size)) else { return nil }
+        if header.payloadSize > 0 && header.payloadSize <= Self.maxInboundFrameBytes {
+            var buf = [UInt8](repeating: 0, count: Int(header.payloadSize))
+            guard readExact(fd, &buf, Int(header.payloadSize)) else { return nil }
             payload = Data(buf)
-        } else if size > Self.maxInboundFrameBytes {
+        } else if header.payloadSize > Self.maxInboundFrameBytes {
             return nil
         }
 
-        return RawFrame(type: type, payload: payload)
+        return RawFrame(header: header, payload: payload)
     }
 
     private func readExact(_ fd: Int32, _ buffer: inout [UInt8], _ count: Int) -> Bool {

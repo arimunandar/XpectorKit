@@ -25,10 +25,23 @@ let package = Package(
             dependencies: ["Peertalk"],
             path: "Sources/XpectorKit"
         ),
+        // Load-time constructor that auto-starts the inspection server in
+        // DEBUG builds (zero-code integration). ObjC because Swift has no
+        // __attribute__((constructor)) equivalent.
+        .target(
+            name: "XpectorAutoStart",
+            path: "Sources/XpectorAutoStart",
+            publicHeadersPath: "include"
+        ),
         .target(
             name: "XpectorServer",
-            dependencies: ["XpectorKit"],
+            dependencies: ["XpectorKit", "XpectorAutoStart"],
             path: "Sources/XpectorServer"
+        ),
+        .testTarget(
+            name: "XpectorKitTests",
+            dependencies: ["XpectorKit"],
+            path: "Tests/XpectorKitTests"
         ),
     ]
 )

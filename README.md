@@ -14,6 +14,22 @@ Link the **XpectorServer** product to your app target.
 
 ## Quick Start
 
+**Zero code.** In DEBUG builds the server starts automatically the moment your
+app launches — adding the package and linking **XpectorServer** is the entire
+integration. Open the Xpector Mac app and it auto-connects.
+
+Opt-outs and overrides:
+
+- Set `XPECTOR_DISABLED=1` in your scheme's environment variables to skip
+  auto-start entirely.
+- Call `XpectorServer.shared.start(config:)` yourself to use a custom
+  configuration — a manual start always wins over auto-start (before
+  auto-start fires it becomes a no-op; after, the server restarts with your
+  config).
+- Auto-start is compiled out of non-DEBUG builds completely.
+
+Manual start (custom config, or if you prefer explicitness):
+
 ```swift
 import XpectorServer
 
@@ -21,7 +37,9 @@ import XpectorServer
 struct MyApp: App {
     init() {
         #if DEBUG
-        XpectorServer.shared.start()
+        var config = XPConfiguration()
+        config.enableHangDetection = true
+        XpectorServer.shared.start(config: config)
         #endif
     }
 
@@ -31,23 +49,8 @@ struct MyApp: App {
 }
 ```
 
-UIKit:
-
-```swift
-import XpectorServer
-
-@main
-class AppDelegate: UIResponder, UIApplicationDelegate {
-    func application(_ application: UIApplication, didFinishLaunchingWithOptions ...) -> Bool {
-        #if DEBUG
-        XpectorServer.shared.start()
-        #endif
-        return true
-    }
-}
-```
-
-That's it. Open the Xpector Mac app — it auto-connects.
+UIKit works the same way — call `start(config:)` from
+`application(_:didFinishLaunchingWithOptions:)`.
 
 ## Enabling in non-Release configurations
 
@@ -331,7 +334,17 @@ XpectorKit uses a binary frame protocol (16-byte header + JSON payload):
 └──────────┴──────────┴──────────┴──────────────┴─────────┘
 ```
 
-All values are big-endian. Protocol version: `1`. Payload is JSON-encoded.
+All values are big-endian. Frame version: `1`. Payload is JSON-encoded.
+
+**Request/response correlation (protocol 1.1):** responses echo the request
+frame's `tag` verbatim, so clients can run concurrent in-flight requests and
+pair each reply with its request. `tag = 0` means uncorrelated (events,
+legacy clients).
+
+**Handshake:** the `pong`/`appInfo` payload carries `protocolVersion`
+(currently `"1.1"`) and a `capabilities` string array (e.g.
+`"tagCorrelation"`, `"hierarchy"`, `"keychain"`). Feature-gate on
+capabilities, not version strings; both fields absent means a 1.0 peer.
 
 ## License
 

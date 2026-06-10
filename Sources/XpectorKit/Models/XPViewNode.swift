@@ -11,7 +11,9 @@ public struct XPViewNode: Identifiable, Codable, Sendable {
     public let isUserInteractionEnabled: Bool
     public let accessibilityIdentifier: String?
     public let viewControllerClassName: String?
-    public let screenshot: Data?
+    /// Mutable so the capture pipeline can rasterize on the main thread and
+    /// inject the encoded JPEG from a background queue afterwards.
+    public var screenshot: Data?
     public var children: [XPViewNode]
 
     // Accessibility

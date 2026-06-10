@@ -10,6 +10,14 @@ final class XPOSLogCapture: @unchecked Sendable {
     private let appSubsystem: String
     private let queue = DispatchQueue(label: "com.xpector.oslog", qos: .utility)
 
+    /// Polling cadence. 2s of log latency feels broken next to Xcode's console
+    /// while someone is actually inspecting, but there's no reason to churn
+    /// OSLogStore when nobody is connected — so the server tightens the
+    /// interval on peer connect and relaxes it on disconnect.
+    private static let activeInterval: TimeInterval = 0.5
+    private static let idleInterval: TimeInterval = 2.0
+    private var isActivePolling = false
+
     init(onEntry: @escaping (XPLogEntry) -> Void) {
         self.appSubsystem = Bundle.main.bundleIdentifier ?? ""
         self.lastTimestamp = Date()
@@ -20,12 +28,23 @@ final class XPOSLogCapture: @unchecked Sendable {
         guard timer == nil else { return }
 
         let source = DispatchSource.makeTimerSource(queue: queue)
-        source.schedule(deadline: .now() + 1, repeating: 2.0)
+        source.schedule(deadline: .now() + 1, repeating: Self.idleInterval)
         source.setEventHandler { [weak self] in
             self?.pollEntries()
         }
         source.resume()
         timer = source
+    }
+
+    /// Reschedules on the capture queue (the timer's queue) so cadence changes
+    /// never race the event handler.
+    func setActivePolling(_ active: Bool) {
+        queue.async { [weak self] in
+            guard let self, let timer = self.timer, self.isActivePolling != active else { return }
+            self.isActivePolling = active
+            let interval = active ? Self.activeInterval : Self.idleInterval
+            timer.schedule(deadline: .now() + interval, repeating: interval)
+        }
     }
 
     func stop() {
