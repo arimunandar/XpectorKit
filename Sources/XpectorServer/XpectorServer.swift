@@ -683,7 +683,8 @@ public final class XpectorServer: @unchecked Sendable {
     }
 
     private static func layerDTO(_ node: XPViewNode, depth: Int) -> XPLayerDTO {
-        let img = node.screenshot.map { "data:image/jpeg;base64," + $0.base64EncodedString() }
+        // Layers slices are PNG (alpha-preserving) — see `captureLayersJSON`.
+        let img = node.screenshot.map { "data:image/png;base64," + $0.base64EncodedString() }
         let label = (node.textContent?.isEmpty == false ? node.textContent : nil) ?? node.accessibilityLabel
         return XPLayerDTO(
             id: node.id.uuidString,
@@ -705,7 +706,10 @@ public final class XpectorServer: @unchecked Sendable {
                 // previously downscaled to 400px and looked soft).
                 request: XPHierarchyRequest(includeScreenshots: true,
                                             maxScreenshotScale: 2.0,
-                                            maxScreenshotDimension: 1200)
+                                            maxScreenshotDimension: 1200),
+                // PNG slices so transparent wrapper views don't flatten to opaque
+                // white sheets that occlude the exploded 3D stack.
+                pngScreenshots: true
             ) { snapshot in
                 let payload = XPLayersPayload(
                     screenW: snapshot.screenSize.width,

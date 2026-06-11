@@ -770,6 +770,8 @@ final class XPHttpLogServer: @unchecked Sendable {
       }
       .layers-slider { display: flex; align-items: center; gap: 8px; color: #8b929c; font-size: 11.5px; }
       .layers-slider input { accent-color: #7fb0ff; width: 130px; }
+      .layers-live { display: flex; align-items: center; gap: 6px; color: #8b929c; font-size: 11.5px; cursor: pointer; user-select: none; }
+      .layers-live input { accent-color: #6fd08c; }
       .layers-zoom { display: flex; align-items: center; gap: 6px; }
       .layers-zoomval { color: #8b929c; font-size: 11.5px; min-width: 38px; text-align: center; }
       .layers-meta { color: #5d646e; font-size: 11.5px; margin-left: auto; }
@@ -1021,6 +1023,7 @@ final class XPHttpLogServer: @unchecked Sendable {
             <button class="act act-icon" id="layersZoomIn" title="Zoom in"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
           </span>
           <button class="act" id="layersReset" title="Reset view">reset</button>
+          <label class="layers-live" title="Auto-refresh when the screen changes"><input id="layersLive" type="checkbox" checked>live</label>
           <span class="layers-meta" id="layersMeta"></span>
         </div>
         <div class="layers-body">
@@ -1096,7 +1099,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         filterEl.placeholder = v === 'net' ? 'filter requests…' : v === 'leaks' ? 'filter leaks…'
           : v === 'nav' ? 'filter navigation…' : 'filter logs…';
         if (v === 'screen') startScreenPolling(); else stopScreenPolling();
-        if (v === 'layers') loadLayers(true);   // always re-capture so it matches the live UI
+        if (v === 'layers') { loadLayers(true); startLayersLive(); } else { stopLayersLive(); }
         applyFilter();
       }
       for (const [tabId, val] of TABS) document.getElementById(tabId).onclick = () => setView(val);
@@ -1504,6 +1507,7 @@ final class XPHttpLogServer: @unchecked Sendable {
       const layersMetaEl = document.getElementById('layersMeta');
       const layersExplodeEl = document.getElementById('layersExplode');
       const layersZoomValEl = document.getElementById('layersZoomVal');
+      const layersLiveEl = document.getElementById('layersLive');
       const propsEmptyEl = document.getElementById('propsEmpty');
       const propsHeadEl = document.getElementById('propsHead');
       const propsGroupsEl = document.getElementById('propsGroups');
@@ -1511,6 +1515,8 @@ final class XPHttpLogServer: @unchecked Sendable {
       let layersLoaded = false, layersData = null;
       let layRotX = -16, layRotY = 24, layExplode = 700, layFit = 1, layZoom = 1, layMaxOrder = 0;
       let layDown = null, layDragged = false, selectedNodeId = null;
+      let layersLiveTimer = null, layersSig = '';   // live auto-refresh state
+      const LAYERS_POLL_MS = 1500;
       const layerEls = {};    // id -> 3D layer div
       const treeRowEls = {};  // id -> tree row
 
@@ -1526,6 +1532,43 @@ final class XPHttpLogServer: @unchecked Sendable {
           .then(data => { layersData = data; buildLayers(); })
           .catch(() => { layersLoaded = false; showLayersHint('Hierarchy unavailable — enable navigation screenshots in the SDK config.'); });
       }
+      // A cheap fingerprint of what's on screen: each node's class, rounded
+      // frame, and slice byte-length (which shifts when its rendered content
+      // changes). Used to skip rebuilds when nothing actually changed.
+      function computeLayersSig(data) {
+        if (!data) return '';
+        const all = flattenLayers(data.windows || [], []);
+        let s = (data.screenW | 0) + 'x' + (data.screenH | 0) + ':';
+        for (const n of all) {
+          s += n.cls + ',' + (n.x | 0) + ',' + (n.y | 0) + ',' + (n.w | 0) + ',' + (n.h | 0) + ',' + (n.img ? n.img.length : 0) + ';';
+        }
+        return s;
+      }
+      // Stable identity across captures (node UUIDs are reassigned every
+      // capture, so selection is re-matched by class + frame instead).
+      function nodeKey(n) { return n.cls + '@' + (n.x | 0) + ',' + (n.y | 0) + ',' + (n.w | 0) + ',' + (n.h | 0); }
+      // One live tick: re-capture, and rebuild only if the screen actually
+      // changed — preserving the camera (rotation/zoom/explode) and re-selecting
+      // the previously selected node by its stable key.
+      function refreshLayersLive() {
+        if (document.hidden || activeView !== 'layers' || layDown) return;  // skip when hidden or mid-drag
+        fetch('/hierarchy').then(r => r.ok ? r.json() : Promise.reject(r.status)).then(data => {
+          if (computeLayersSig(data) === layersSig) return;
+          const prevKey = (selectedNodeId && treeRowEls[selectedNodeId]) ? nodeKey(treeRowEls[selectedNodeId]._node) : null;
+          layersData = data;
+          buildLayers();
+          if (prevKey) {
+            for (const id in treeRowEls) {
+              if (nodeKey(treeRowEls[id]._node) === prevKey) { selectNode(id); break; }
+            }
+          }
+        }).catch(() => {});
+      }
+      function startLayersLive() {
+        stopLayersLive();
+        if (layersLiveEl.checked) layersLiveTimer = setInterval(refreshLayersLive, LAYERS_POLL_MS);
+      }
+      function stopLayersLive() { if (layersLiveTimer) { clearInterval(layersLiveTimer); layersLiveTimer = null; } }
       function flattenLayers(nodes, out) {
         for (const n of nodes) { out.push(n); if (n.children && n.children.length) flattenLayers(n.children, out); }
         return out;
@@ -1593,6 +1636,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         layMaxOrder = Math.max(1, order - 1);
         layersHintEl.classList.add('hidden');
         layersMetaEl.textContent = all.length + ' nodes · ' + Math.round(sw) + '×' + Math.round(sh);
+        layersSig = computeLayersSig(layersData);   // mark what's currently shown, for live diffing
         applyLayerTransforms();
       }
       function applyLayerTransforms() {
@@ -1803,6 +1847,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         layRotX = -16; layRotY = 24; layExplode = 700; layZoom = 1; layersExplodeEl.value = 700; applyLayerTransforms();
       };
       document.getElementById('layersRefresh').onclick = () => loadLayers(true);
+      layersLiveEl.onchange = () => { if (activeView === 'layers') startLayersLive(); };
       // Resize the hierarchy panel by dragging the divider.
       const layersResizerEl = document.getElementById('layersResizer');
       let rzDown = null;
@@ -1869,7 +1914,12 @@ final class XPHttpLogServer: @unchecked Sendable {
       es.onmessage = (e) => { try { appendLog(JSON.parse(e.data)); } catch (_) {} };
       es.addEventListener('net', (e) => { try { addNet(JSON.parse(e.data)); } catch (_) {} });
       es.addEventListener('leak', (e) => { try { addLeak(JSON.parse(e.data)); } catch (_) {} });
-      es.addEventListener('nav', (e) => { try { addNav(JSON.parse(e.data)); } catch (_) {} });
+      es.addEventListener('nav', (e) => {
+        try { addNav(JSON.parse(e.data)); } catch (_) {}
+        // A navigation is an unambiguous screen change — refresh the layers
+        // promptly (after the transition settles) when the tab is live.
+        if (activeView === 'layers' && layersLiveEl.checked) setTimeout(refreshLayersLive, 350);
+      });
       setView('logs');
     </script>
     </body>

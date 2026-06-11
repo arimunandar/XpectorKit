@@ -19,8 +19,14 @@ final class XPHierarchyCapture {
     /// Two-phase capture: traversal + per-node rasterization on the main
     /// thread, then JPEG encoding and tree injection on `encodeQueue`. The
     /// completion is invoked on `encodeQueue`.
+    /// `pngScreenshots`: encode per-node slices as PNG instead of JPEG. PNG
+    /// preserves alpha, so content-less wrapper views (clear backgrounds) stay
+    /// transparent instead of flattening to opaque white blocks — important for
+    /// the exploded Layers view, where ~20 stacked white sheets otherwise occlude
+    /// the real UI. The Mac client keeps JPEG (smaller) via the default.
     static func capture(
         request: XPHierarchyRequest = XPHierarchyRequest(),
+        pngScreenshots: Bool = false,
         completion: @escaping (XPHierarchySnapshot) -> Void
     ) {
         dispatchPrecondition(condition: .onQueue(.main))
@@ -47,7 +53,7 @@ final class XPHierarchyCapture {
             var encoded: [UUID: Data] = [:]
             encoded.reserveCapacity(images.count)
             for (id, image) in images {
-                encoded[id] = image.jpegData(compressionQuality: 0.7)
+                encoded[id] = pngScreenshots ? image.pngData() : image.jpegData(compressionQuality: 0.7)
             }
             var windows = windowNodes
             if !encoded.isEmpty {
