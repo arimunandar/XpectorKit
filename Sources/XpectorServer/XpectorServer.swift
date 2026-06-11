@@ -90,6 +90,21 @@ public final class XpectorServer: @unchecked Sendable {
         start(config: config, isAutoStart: false)
     }
 
+    /// The URL of the read-only LAN web viewer (live logs, network, layers,
+    /// node inspector). Open it from any browser on the same WiFi network.
+    ///
+    /// Returns `nil` when the viewer isn't available — the server hasn't been
+    /// started, or the log stream is disabled (`enableLocalLogStream == false`,
+    /// e.g. via `XPECTOR_LOG_STREAM_DISABLED=1`). The host is the device's WiFi
+    /// (`en0`) address, falling back to `localhost` when none is found (e.g. on
+    /// the Simulator). Use this to surface the URL in your own debug UI instead
+    /// of reading the launch log.
+    public func logViewerURL() -> URL? {
+        guard let port = httpLogServer?.actualPort, port > 0 else { return nil }
+        let host = xpLocalWiFiAddress() ?? "localhost"
+        return URL(string: "http://\(host):\(port)/")
+    }
+
     /// Entry point for the DEBUG zero-code auto-start. No-op if the host
     /// already started the server manually.
     func startAutomatically() {
@@ -212,12 +227,30 @@ public final class XpectorServer: @unchecked Sendable {
                 // opt-in, so disabling screenshots disables it too.
                 currentScreenshot: config.enableNavigationScreenshots
                     ? { [weak self] in self?.currentScreenJPEG() }
-                    : { nil }
+                    : { nil },
+                // The Layers tab renders per-component slices, the same content
+                // class as screenshots — so gate it on the screenshot opt-in too.
+                layersJSON: config.enableNavigationScreenshots
+                    ? { completion in XpectorServer.captureLayersJSON(completion) }
+                    : nil,
+                // Per-node attribute groups for the Layers tab's Properties
+                // panel. Same content class as the slices/screenshots, so it
+                // rides the same opt-in.
+                nodeDetailJSON: config.enableNavigationScreenshots
+                    ? { id, completion in XpectorServer.captureNodeDetailJSON(id, completion) }
+                    : nil,
+                // The selected node's group image (the view rendered *with* its
+                // subtree) for the Properties panel's download button — rendered
+                // on demand, so a node-select stays cheap.
+                nodeImage: config.enableNavigationScreenshots
+                    ? { id, completion in XpectorServer.captureNodeGroupImage(id, completion) }
+                    : nil
             )
             httpServer.start()
             httpLogServer = httpServer
-            let host = xpLocalWiFiAddress() ?? "localhost"
-            print("[Xpector] Log stream: http://\(host):\(httpPort)/")
+            if let url = logViewerURL() {
+                print("[Xpector] Log stream: \(url.absoluteString)")
+            }
         }
 
         foregroundObserver = NotificationCenter.default.addObserver(
@@ -625,6 +658,108 @@ public final class XpectorServer: @unchecked Sendable {
         let renderer = UIGraphicsImageRenderer(size: target)
         let resized = renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: target)) }
         return resized.jpegData(compressionQuality: 0.6)
+    }
+
+    // MARK: - Layers (Lookin-style hierarchy for the web viewer)
+
+    /// Compact per-component node for the Layers tab: absolute frame, a solo
+    /// slice (`render(in:)` with subviews hidden), opacity, and tree depth.
+    private struct XPLayerDTO: Encodable {
+        let id: String
+        let cls: String
+        let x, y, w, h: Double
+        let alpha: Double
+        let hidden: Bool
+        let depth: Int
+        let label: String?
+        let img: String?   // data:image/jpeg;base64,… or nil
+        let children: [XPLayerDTO]
+    }
+
+    private struct XPLayersPayload: Encodable {
+        let screenW: Double
+        let screenH: Double
+        let windows: [XPLayerDTO]
+    }
+
+    private static func layerDTO(_ node: XPViewNode, depth: Int) -> XPLayerDTO {
+        let img = node.screenshot.map { "data:image/jpeg;base64," + $0.base64EncodedString() }
+        let label = (node.textContent?.isEmpty == false ? node.textContent : nil) ?? node.accessibilityLabel
+        return XPLayerDTO(
+            id: node.id.uuidString,
+            cls: node.className,
+            x: node.frameToRoot.x, y: node.frameToRoot.y,
+            w: node.frameToRoot.width, h: node.frameToRoot.height,
+            alpha: node.alpha, hidden: node.isHidden, depth: depth, label: label, img: img,
+            children: node.children.map { layerDTO($0, depth: depth + 1) }
+        )
+    }
+
+    /// Captures the hierarchy with per-node slices and hands back compact JSON.
+    /// Capture runs on the main thread; the completion fires on the encode queue.
+    static func captureLayersJSON(_ completion: @escaping (Data?) -> Void) {
+        DispatchQueue.main.async {
+            XPHierarchyCapture.capture(
+                // Higher fidelity so slices look like the real UI: render at 2×
+                // and allow up to 1200px per slice (the full-window slice was
+                // previously downscaled to 400px and looked soft).
+                request: XPHierarchyRequest(includeScreenshots: true,
+                                            maxScreenshotScale: 2.0,
+                                            maxScreenshotDimension: 1200)
+            ) { snapshot in
+                let payload = XPLayersPayload(
+                    screenW: snapshot.screenSize.width,
+                    screenH: snapshot.screenSize.height,
+                    windows: snapshot.windows.map { layerDTO($0, depth: 0) }
+                )
+                completion(try? JSONEncoder().encode(payload))
+            }
+        }
+    }
+
+    /// Builds one live view's grouped attributes (Layout, View/Layer,
+    /// Accessibility + any type-specific groups) and hands back JSON for the
+    /// Layers tab's Properties panel. The view is looked up on the main thread
+    /// from the capture registry; `nil` (e.g. the view is no longer live)
+    /// yields a `nil` payload so the endpoint can answer 404. Encoding runs on
+    /// the shared encode queue, off-main.
+    static func captureNodeDetailJSON(_ id: String, _ completion: @escaping (Data?) -> Void) {
+        guard let uuid = UUID(uuidString: id) else { completion(nil); return }
+        DispatchQueue.main.async {
+            guard let view = XPHierarchyCapture.lookupView(uuid) else {
+                completion(nil)
+                return
+            }
+            let groups = XPAttributeBuilder.build(for: view)
+            let className = String(describing: type(of: view))
+            let response = XPNodeDetailResponse(
+                nodeID: uuid,
+                className: className,
+                groups: groups,
+                groupScreenshot: nil
+            )
+            XPHierarchyCapture.encodeQueue.async {
+                completion(try? JSONEncoder().encode(response))
+            }
+        }
+    }
+
+    /// Renders one live view's *group* image (the view together with its whole
+    /// subtree, HD, opaque) and hands back PNG bytes for the Properties panel's
+    /// download button. Rendered on the main thread; encoded off-main. `nil`
+    /// (no such live view, or zero-size) yields a 404 at the endpoint.
+    static func captureNodeGroupImage(_ id: String, _ completion: @escaping (Data?) -> Void) {
+        guard let uuid = UUID(uuidString: id) else { completion(nil); return }
+        DispatchQueue.main.async {
+            guard let view = XPHierarchyCapture.lookupView(uuid),
+                  let image = XPHierarchyCapture.captureGroupScreenshotImage(of: view) else {
+                completion(nil)
+                return
+            }
+            XPHierarchyCapture.encodeQueue.async {
+                completion(image.pngData())
+            }
+        }
     }
 
     private func sendAppInfo() {

@@ -16,6 +16,12 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section("Web Viewer") {
+                    Button("Show connection QR + URL") {
+                        XpectorServer.shared.presentLogViewer()
+                    }
+                }
+
                 Section("Navigation Demo") {
                     NavigationLink("Push Detail Screen") {
                         DetailDemoView(depth: 1)

@@ -39,6 +39,21 @@ final class XPHttpLogServer: @unchecked Sendable {
     /// Returns nil if no screen is available. Provided by `XpectorServer`, which
     /// hops to the main thread for the UIKit snapshot.
     private let currentScreenshot: () -> Data?
+    /// Captures the live view hierarchy as compact JSON (per-component "solo"
+    /// slices + frames) for the Layers tab's exploded 3D view. Asynchronous — it
+    /// hops to the main thread to rasterize, then encodes off-main. Nil disables
+    /// the `/hierarchy` endpoint (e.g. when navigation screenshots are off).
+    private let layersJSON: ((@escaping (Data?) -> Void) -> Void)?
+    /// Builds one live view's grouped attributes as JSON for the Layers tab's
+    /// Properties panel, keyed by node UUID. Asynchronous — it hops to the main
+    /// thread to look the view up, then encodes off-main. A `nil` payload means
+    /// the view is no longer live (answered as 404). Nil disables `/node/`.
+    private let nodeDetailJSON: ((String, @escaping (Data?) -> Void) -> Void)?
+    /// Renders one live view's group image (the view + its subtree) as PNG bytes
+    /// for the Properties panel's download button, keyed by node UUID. Async and
+    /// on demand. A `nil` payload means the view is no longer live (404). Nil
+    /// disables `/node/<id>/image`.
+    private let nodeImage: ((String, @escaping (Data?) -> Void) -> Void)?
 
     private var keepaliveTimer: DispatchSourceTimer?
 
@@ -56,10 +71,16 @@ final class XPHttpLogServer: @unchecked Sendable {
         recentNetwork: @escaping () -> [XPNetworkEntry] = { [] },
         recentLeaks: @escaping () -> [XPPerfEvent] = { [] },
         recentNav: @escaping () -> [XPNavEvent] = { [] },
-        currentScreenshot: @escaping () -> Data? = { nil }
+        currentScreenshot: @escaping () -> Data? = { nil },
+        layersJSON: ((@escaping (Data?) -> Void) -> Void)? = nil,
+        nodeDetailJSON: ((String, @escaping (Data?) -> Void) -> Void)? = nil,
+        nodeImage: ((String, @escaping (Data?) -> Void) -> Void)? = nil
     ) {
         self.port = port
         self.appName = appName
+        self.layersJSON = layersJSON
+        self.nodeDetailJSON = nodeDetailJSON
+        self.nodeImage = nodeImage
         self.recentLogs = recentLogs
         self.recentNetwork = recentNetwork
         self.recentLeaks = recentLeaks
@@ -234,6 +255,19 @@ final class XPHttpLogServer: @unchecked Sendable {
     private func handleClient(_ fd: Int32) {
         guard let path = readRequestPath(fd) else { close(fd); return }
 
+        // Per-node routes: "/node/<uuid>" (attributes JSON) and
+        // "/node/<uuid>/image" (group PNG). UUIDs are ASCII so the bare path
+        // needs no decoding. Routed before the exact-path switch.
+        if path.hasPrefix("/node/") {
+            let rest = String(path.dropFirst(6))
+            if rest.hasSuffix("/image") {
+                serveNodeImage(fd, id: String(rest.dropLast(6)))
+            } else {
+                serveNodeDetail(fd, id: rest)
+            }
+            return
+        }
+
         switch path {
         case "/stream":
             serveStream(fd)
@@ -241,6 +275,8 @@ final class XPHttpLogServer: @unchecked Sendable {
             serveHTML(fd)
         case "/screen":
             serveScreenshot(fd)
+        case "/hierarchy":
+            serveHierarchy(fd)
         default:
             writeAndClose(fd, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
         }
@@ -265,6 +301,98 @@ final class XPHttpLogServer: @unchecked Sendable {
         }
         writeLock.unlock()
         close(fd)
+    }
+
+    /// Returns the live view hierarchy (per-component slices + frames) as JSON
+    /// for the Layers tab. Async: the provider rasterizes on the main thread and
+    /// encodes off-main, then we write the response from that completion.
+    private func serveHierarchy(_ fd: Int32) {
+        guard let layersJSON else {
+            writeAndClose(fd, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
+        }
+        layersJSON { [weak self] data in
+            guard let self else { close(fd); return }
+            guard let data, !data.isEmpty else {
+                self.writeAndClose(fd, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                return
+            }
+            let head = "HTTP/1.1 200 OK\r\n"
+                + "Content-Type: application/json\r\n"
+                + "Content-Length: \(data.count)\r\n"
+                + "Cache-Control: no-store\r\n"
+                + "Access-Control-Allow-Origin: *\r\n"
+                + "Connection: close\r\n"
+                + "\r\n"
+            self.writeLock.lock()
+            if self.writeAll(fd, Array(head.utf8)) {
+                _ = self.writeAll(fd, [UInt8](data))
+            }
+            self.writeLock.unlock()
+            close(fd)
+        }
+    }
+
+    /// Returns one live view's grouped attributes as JSON for the Properties
+    /// panel. Async, mirroring `serveHierarchy`. A nil/empty payload becomes a
+    /// 404 (rather than 503) so the browser can tell "view no longer live —
+    /// re-capture" apart from "endpoint disabled".
+    private func serveNodeDetail(_ fd: Int32, id: String) {
+        guard let nodeDetailJSON else {
+            writeAndClose(fd, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
+        }
+        nodeDetailJSON(id) { [weak self] data in
+            guard let self else { close(fd); return }
+            guard let data, !data.isEmpty else {
+                self.writeAndClose(fd, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                return
+            }
+            let head = "HTTP/1.1 200 OK\r\n"
+                + "Content-Type: application/json\r\n"
+                + "Content-Length: \(data.count)\r\n"
+                + "Cache-Control: no-store\r\n"
+                + "Access-Control-Allow-Origin: *\r\n"
+                + "Connection: close\r\n"
+                + "\r\n"
+            self.writeLock.lock()
+            if self.writeAll(fd, Array(head.utf8)) {
+                _ = self.writeAll(fd, [UInt8](data))
+            }
+            self.writeLock.unlock()
+            close(fd)
+        }
+    }
+
+    /// Returns one live view's group image (the view + its subtree) as PNG for
+    /// the Properties panel download button. Async, mirroring `serveNodeDetail`.
+    /// A nil/empty payload becomes a 404 (view no longer live).
+    private func serveNodeImage(_ fd: Int32, id: String) {
+        guard let nodeImage else {
+            writeAndClose(fd, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
+        }
+        nodeImage(id) { [weak self] data in
+            guard let self else { close(fd); return }
+            guard let data, !data.isEmpty else {
+                self.writeAndClose(fd, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                return
+            }
+            let head = "HTTP/1.1 200 OK\r\n"
+                + "Content-Type: image/png\r\n"
+                + "Content-Length: \(data.count)\r\n"
+                + "Content-Disposition: attachment; filename=\"node.png\"\r\n"
+                + "Cache-Control: no-store\r\n"
+                + "Access-Control-Allow-Origin: *\r\n"
+                + "Connection: close\r\n"
+                + "\r\n"
+            self.writeLock.lock()
+            if self.writeAll(fd, Array(head.utf8)) {
+                _ = self.writeAll(fd, [UInt8](data))
+            }
+            self.writeLock.unlock()
+            close(fd)
+        }
     }
 
     /// Reads the request line + headers up to `\r\n\r\n` and returns the path.
@@ -461,9 +589,11 @@ final class XPHttpLogServer: @unchecked Sendable {
       /* the autoscroll toggle only applies to Logs; the host filter only to Network */
       body:not([data-tab="logs"]) #autoscrollLabel { display: none; }
       body:not([data-tab="net"]) #baseFilterLabel { display: none; }
-      /* the text filter + clear are meaningless on the Current screen */
+      /* the text filter + clear are meaningless on the Current screen / Layers */
       body[data-tab="screen"] #filter,
-      body[data-tab="screen"] #clear { display: none; }
+      body[data-tab="screen"] #clear,
+      body[data-tab="layers"] #filter,
+      body[data-tab="layers"] #clear { display: none; }
       header button.act {
         background: #20242b; color: #b6bcc6; border: 1px solid #2a2f37; padding: 6px 13px;
         border-radius: 8px; font: inherit; cursor: pointer; flex: 0 0 auto; transition: background .15s, color .15s;
@@ -630,6 +760,125 @@ final class XPHttpLogServer: @unchecked Sendable {
       .nav-route { color: #d6dae0; word-break: break-word; }
       .nav-time { color: #5d646e; font-size: 11px; }
 
+      /* layers — Lookin-style exploded 3D hierarchy */
+      #layersView { position: relative; display: flex; flex-direction: column; }
+      /* ID specificity beats `.view.hidden`, so restore hiding explicitly. */
+      #layersView.hidden { display: none; }
+      .layers-bar {
+        flex: 0 0 auto; display: flex; align-items: center; gap: 14px;
+        padding: 8px 14px; border-bottom: 1px solid #23272e; background: #14171c;
+      }
+      .layers-slider { display: flex; align-items: center; gap: 8px; color: #8b929c; font-size: 11.5px; }
+      .layers-slider input { accent-color: #7fb0ff; width: 130px; }
+      .layers-zoom { display: flex; align-items: center; gap: 6px; }
+      .layers-zoomval { color: #8b929c; font-size: 11.5px; min-width: 38px; text-align: center; }
+      .layers-meta { color: #5d646e; font-size: 11.5px; margin-left: auto; }
+      .layers-body { flex: 1 1 auto; min-height: 0; display: flex; }
+      .layers-tree {
+        flex: 0 0 256px; overflow: auto; border-right: 1px solid #23272e;
+        background: #0f1217; padding: 6px 0; font-size: 12px;
+      }
+      /* A draggable divider to resize the hierarchy panel. */
+      .layers-resizer { flex: 0 0 5px; cursor: col-resize; background: #23272e; }
+      .layers-resizer:hover, .layers-resizer.drag { background: #3a6fae; }
+      /* Rows size to their content (indent + name) and the panel scrolls
+         horizontally, so deep nodes are readable instead of truncated. */
+      .tree-row {
+        display: flex; align-items: center; gap: 6px; padding: 3px 16px 3px 0;
+        white-space: nowrap; cursor: pointer; color: #b6bcc6;
+        width: max-content; min-width: 100%;
+      }
+      .tree-row:hover { background: #15181d; }
+      .tree-row.sel { background: #1c2333; color: #cfe0ff; }
+      .tree-row.dim { opacity: .45; }
+      .tree-row .tdot { width: 6px; height: 6px; border-radius: 50%; background: #3a414c; flex: 0 0 auto; }
+      .tree-row .tlbl { color: #5d646e; }
+      .layers-stage {
+        flex: 1 1 auto; position: relative; overflow: hidden; perspective: 1700px;
+        display: flex; align-items: center; justify-content: center;
+        cursor: grab; touch-action: none; background:
+          radial-gradient(circle at 50% 40%, #15191f 0%, #0d0f12 70%);
+      }
+      .layers-stage.grabbing { cursor: grabbing; }
+      .layers-scene { position: relative; transform-style: preserve-3d; will-change: transform; }
+      .layer {
+        position: absolute; background-size: 100% 100%; background-repeat: no-repeat;
+        border: 1px solid rgba(127,176,255,.18); box-sizing: border-box;
+        transition: outline-color .1s;
+      }
+      .layer.sel { outline: 2px solid #7fb0ff; outline-offset: 0; border-color: transparent; z-index: 1; }
+      .layers-hint {
+        position: absolute; top: 50%; left: 0; right: 0; transform: translateY(-50%);
+        text-align: center; color: #5d646e; font-size: 13px; pointer-events: none; padding: 0 24px;
+      }
+      .layers-hint.hidden { display: none; }
+      .layers-info {
+        position: absolute; left: 12px; bottom: 12px; max-width: 70%;
+        background: rgba(18,21,26,.92); border: 1px solid #23272e; border-radius: 9px;
+        padding: 9px 12px; font-size: 12px; color: #d6dae0; pointer-events: none;
+      }
+      .layers-info.hidden { display: none; }
+      .layers-info .li-cls { color: #fff; font-weight: 600; }
+      .layers-info .li-meta { color: #8b929c; font-size: 11px; margin-top: 3px; }
+
+      /* ---- Properties panel (right sidebar) ---- */
+      .layers-props {
+        flex: 0 0 320px; overflow: auto; background: #0f1217;
+        border-left: 1px solid #23272e; font-size: 12px;
+      }
+      .props-empty { color: #5d646e; padding: 16px; font-size: 12.5px; }
+      .props-empty.hidden { display: none; }
+      .props-head {
+        position: sticky; top: 0; z-index: 1; background: #0f1217;
+        padding: 9px 10px 9px 14px; border-bottom: 1px solid #23272e;
+        color: #fff; font-weight: 600;
+        display: flex; align-items: center; gap: 10px;
+      }
+      .props-head.hidden { display: none; }
+      .props-head-title { flex: 1 1 auto; min-width: 0; word-break: break-word; }
+      .props-dl {
+        flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+        width: 28px; height: 28px; padding: 0; border: 1px solid #2a2f37; border-radius: 7px;
+        background: #1a1d23; color: #b6bcc6; cursor: pointer;
+      }
+      .props-dl:hover { background: #23272e; color: #cfe0ff; border-color: #3a6fae; }
+      .props-dl svg { width: 16px; height: 16px; }
+      .props-groups { padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+      .props-group { background: #12151a; border: 1px solid #23272e; border-radius: 8px; overflow: hidden; }
+      .props-group-head {
+        display: flex; align-items: center; gap: 7px; padding: 8px 11px;
+        background: #14171c; color: #cfe0ff; font-weight: 600; cursor: pointer;
+        user-select: none;
+      }
+      .props-group-head .pg-caret { color: #5d646e; font-size: 10px; transition: transform .12s; }
+      .props-group.collapsed .pg-caret { transform: rotate(-90deg); }
+      .props-group.collapsed .props-group-body { display: none; }
+      .props-section-title {
+        color: #7d8794; font-size: 10.5px; text-transform: uppercase;
+        letter-spacing: .04em; padding: 9px 11px 3px;
+      }
+      .props-attr {
+        display: flex; gap: 10px; align-items: baseline; padding: 4px 11px;
+      }
+      .props-k { color: #7fb0ff; flex: 0 0 42%; word-break: break-word; }
+      .props-v {
+        color: #b6bcc6; flex: 1 1 auto; word-break: break-word;
+        display: flex; align-items: center; gap: 6px;
+      }
+      .props-swatch {
+        width: 13px; height: 13px; border-radius: 3px; flex: 0 0 auto;
+        border: 1px solid rgba(255,255,255,.18);
+        background-image:
+          linear-gradient(45deg, #555 25%, transparent 25%),
+          linear-gradient(-45deg, #555 25%, transparent 25%),
+          linear-gradient(45deg, transparent 75%, #555 75%),
+          linear-gradient(-45deg, transparent 75%, #555 75%);
+        background-size: 8px 8px; background-position: 0 0, 0 4px, 4px -4px, -4px 0;
+      }
+      .props-swatch-fill { width: 100%; height: 100%; border-radius: 2px; }
+      .props-bool-on { color: #6fd08c; font-weight: 600; }
+      .props-bool-off { color: #8b929c; }
+
       /* lightbox */
       #lightbox {
         position: fixed; inset: 0; background: rgba(0,0,0,.85); display: flex;
@@ -697,6 +946,17 @@ final class XPHttpLogServer: @unchecked Sendable {
         #screenImg { max-height: none; }         /* image scrolls naturally */
         .nav-thumb { width: 64px; height: 116px; }
 
+        /* Layers: tree sits above the 3D stage instead of beside it */
+        .layers-body { flex-direction: column; }
+        .layers-tree { flex: 0 0 34%; border-right: none; border-bottom: 1px solid #23272e; }
+        .layers-resizer { display: none; }
+        .layers-bar { flex-wrap: wrap; gap: 10px; }
+        /* Properties drop below the stage as a bottom sheet */
+        .layers-props {
+          order: 100; flex: 0 0 auto; max-height: 42%;
+          border-left: none; border-top: 1px solid #23272e;
+        }
+
         /* Headers stack (name above value, each full-width) — a narrow value
            column wraps long header values character-by-character otherwise. */
         .hdr-table, .hdr-table tbody, .hdr-table tr, .hdr-table td { display: block; width: auto; }
@@ -730,6 +990,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         <button class="tab" id="tabLeak"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3c3 4 6 7 6 11a6 6 0 0 1-12 0c0-4 3-7 6-11z"/></svg><span class="tl">Leaks</span><span class="count" id="leakCount">0</span></button>
         <button class="tab" id="tabScreen"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="3" width="12" height="18" rx="2"/><path d="M11 18h2"/></svg><span class="tl">Current</span></button>
         <button class="tab" id="tabNav"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="2"/><circle cx="19" cy="18" r="2"/><path d="M7 6h7a3 3 0 0 1 3 3v7"/></svg><span class="tl">Flow</span><span class="count" id="navCount">0</span></button>
+        <button class="tab" id="tabLayers"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg><span class="tl">Layers</span></button>
       </nav>
       <div class="view" id="logsView"><pre id="log"></pre></div>
       <div class="view hidden" id="netView">
@@ -749,6 +1010,33 @@ final class XPHttpLogServer: @unchecked Sendable {
       </div>
       <div class="view hidden" id="navView">
         <div class="nav-list" id="navList"><div class="leak-empty">No navigation captured yet.</div></div>
+      </div>
+      <div class="view hidden" id="layersView">
+        <div class="layers-bar">
+          <button class="act" id="layersRefresh" title="Re-capture">capture</button>
+          <label class="layers-slider">explode<input id="layersExplode" type="range" min="0" max="1600" value="700"></label>
+          <span class="layers-zoom">
+            <button class="act act-icon" id="layersZoomOut" title="Zoom out"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg></button>
+            <span class="layers-zoomval" id="layersZoomVal">100%</span>
+            <button class="act act-icon" id="layersZoomIn" title="Zoom in"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
+          </span>
+          <button class="act" id="layersReset" title="Reset view">reset</button>
+          <span class="layers-meta" id="layersMeta"></span>
+        </div>
+        <div class="layers-body">
+          <div class="layers-tree" id="layersTree"></div>
+          <div class="layers-resizer" id="layersResizer"></div>
+          <div class="layers-stage" id="layersStage">
+            <div class="layers-scene" id="layersScene"></div>
+            <div class="layers-hint" id="layersHint">Capturing hierarchy…</div>
+            <div class="layers-info hidden" id="layersInfo"></div>
+          </div>
+          <div class="layers-props" id="layersProps">
+            <div class="props-empty" id="propsEmpty">Select a node to inspect its properties.</div>
+            <div class="props-head hidden" id="propsHead"></div>
+            <div class="props-groups" id="propsGroups"></div>
+          </div>
+        </div>
       </div>
       <div id="lightbox" class="hidden"><img id="lightboxImg" alt="screen"></div>
     <script>
@@ -795,7 +1083,7 @@ final class XPHttpLogServer: @unchecked Sendable {
 
       // ---- tabs ----
       const TABS = [['tabLogs','logs','logsView'],['tabNet','net','netView'],['tabLeak','leaks','leaksView'],
-                    ['tabScreen','screen','screenView'],['tabNav','nav','navView']];
+                    ['tabScreen','screen','screenView'],['tabNav','nav','navView'],['tabLayers','layers','layersView']];
       function setView(v) {
         activeView = v;
         document.body.dataset.tab = v;
@@ -808,6 +1096,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         filterEl.placeholder = v === 'net' ? 'filter requests…' : v === 'leaks' ? 'filter leaks…'
           : v === 'nav' ? 'filter navigation…' : 'filter logs…';
         if (v === 'screen') startScreenPolling(); else stopScreenPolling();
+        if (v === 'layers') loadLayers(true);   // always re-capture so it matches the live UI
         applyFilter();
       }
       for (const [tabId, val] of TABS) document.getElementById(tabId).onclick = () => setView(val);
@@ -1205,6 +1494,332 @@ final class XPHttpLogServer: @unchecked Sendable {
         document.getElementById('lightbox').classList.remove('hidden');
       }
       document.getElementById('lightbox').onclick = () => document.getElementById('lightbox').classList.add('hidden');
+
+      // ---- layers (Lookin-style exploded hierarchy) ----
+      const layersStageEl = document.getElementById('layersStage');
+      const layersSceneEl = document.getElementById('layersScene');
+      const layersTreeEl = document.getElementById('layersTree');
+      const layersHintEl = document.getElementById('layersHint');
+      const layersInfoEl = document.getElementById('layersInfo');
+      const layersMetaEl = document.getElementById('layersMeta');
+      const layersExplodeEl = document.getElementById('layersExplode');
+      const layersZoomValEl = document.getElementById('layersZoomVal');
+      const propsEmptyEl = document.getElementById('propsEmpty');
+      const propsHeadEl = document.getElementById('propsHead');
+      const propsGroupsEl = document.getElementById('propsGroups');
+      let propsReqId = 0;     // bumped per request; stale responses are ignored
+      let layersLoaded = false, layersData = null;
+      let layRotX = -16, layRotY = 24, layExplode = 700, layFit = 1, layZoom = 1, layMaxOrder = 0;
+      let layDown = null, layDragged = false, selectedNodeId = null;
+      const layerEls = {};    // id -> 3D layer div
+      const treeRowEls = {};  // id -> tree row
+
+      function showLayersHint(msg) { layersHintEl.textContent = msg; layersHintEl.classList.remove('hidden'); }
+      function loadLayers(force) {
+        if (layersLoaded && !force) return;
+        layersLoaded = true;
+        layersSceneEl.innerHTML = ''; layersTreeEl.innerHTML = '';
+        layersInfoEl.classList.add('hidden');
+        clearProps();
+        showLayersHint('Capturing hierarchy…');
+        fetch('/hierarchy').then(r => r.ok ? r.json() : Promise.reject(r.status))
+          .then(data => { layersData = data; buildLayers(); })
+          .catch(() => { layersLoaded = false; showLayersHint('Hierarchy unavailable — enable navigation screenshots in the SDK config.'); });
+      }
+      function flattenLayers(nodes, out) {
+        for (const n of nodes) { out.push(n); if (n.children && n.children.length) flattenLayers(n.children, out); }
+        return out;
+      }
+      function shortCls(cls) {
+        const lt = cls.indexOf('<');               // trim SwiftUI generics for the tree label
+        return lt > 0 ? cls.slice(0, lt) : cls;
+      }
+      function buildLayers() {
+        const all = flattenLayers(layersData.windows || [], []);
+        const sw = layersData.screenW || 1, sh = layersData.screenH || 1;
+        const stageW = layersStageEl.clientWidth || 1, stageH = layersStageEl.clientHeight || 1;
+        layFit = Math.min((stageW * 0.6) / sw, (stageH * 0.78) / sh);
+        layersSceneEl.style.width = (sw * layFit) + 'px';
+        layersSceneEl.style.height = (sh * layFit) + 'px';
+        layersSceneEl.innerHTML = ''; layersTreeEl.innerHTML = '';
+        for (const k in layerEls) delete layerEls[k];
+        for (const k in treeRowEls) delete treeRowEls[k];
+        selectedNodeId = null;
+        // `all` is pre-order = UIKit's paint order, so a running index is the
+        // real front-to-back order: later-painted (e.g. the nav bar) sits in
+        // front. Z is driven by this, NOT tree depth.
+        let order = 0;
+        for (const n of all) {
+          // 3D slice — clamp to the on-screen rectangle. A scroll/content view
+          // can be far taller than the screen; drawing it full-size stretches
+          // the whole stack, so we show only its visible region and crop the
+          // slice image to match (matches what's actually on screen).
+          if (n.w > 0 && n.h > 0) {
+            const ix = Math.max(0, n.x), iy = Math.max(0, n.y);
+            const iw = Math.min(sw, n.x + n.w) - ix, ih = Math.min(sh, n.y + n.h) - iy;
+            if (iw > 0.5 && ih > 0.5) {
+              const d = document.createElement('div');
+              d.className = 'layer';
+              d.style.left = (ix * layFit) + 'px';
+              d.style.top = (iy * layFit) + 'px';
+              d.style.width = (iw * layFit) + 'px';
+              d.style.height = (ih * layFit) + 'px';
+              d.style.opacity = n.hidden ? 0.12 : Math.max(0.3, n.alpha);
+              if (n.img) {
+                d.style.backgroundImage = 'url(' + n.img + ')';
+                d.style.backgroundSize = (n.w * layFit) + 'px ' + (n.h * layFit) + 'px';
+                d.style.backgroundPosition = (-(ix - n.x) * layFit) + 'px ' + (-(iy - n.y) * layFit) + 'px';
+              }
+              d._order = order++;
+              d.onclick = (e) => { e.stopPropagation(); if (layDragged) return; selectNode(n.id); };
+              layersSceneEl.appendChild(d);
+              layerEls[n.id] = d;
+            }
+          }
+          // tree row (the hierarchy menu)
+          const row = document.createElement('div');
+          row.className = 'tree-row' + (n.hidden ? ' dim' : '');
+          row.style.paddingLeft = (8 + n.depth * 13) + 'px';
+          const dot = document.createElement('span'); dot.className = 'tdot';
+          const cls = document.createElement('span'); cls.className = 'tcls'; cls.textContent = shortCls(n.cls);
+          row.title = n.cls;
+          row.appendChild(dot); row.appendChild(cls);
+          if (n.label) { const l = document.createElement('span'); l.className = 'tlbl'; l.textContent = n.label; row.appendChild(l); }
+          row.onclick = () => selectNode(n.id);
+          layersTreeEl.appendChild(row);
+          treeRowEls[n.id] = row;
+          row._node = n;
+        }
+        layMaxOrder = Math.max(1, order - 1);
+        layersHintEl.classList.add('hidden');
+        layersMetaEl.textContent = all.length + ' nodes · ' + Math.round(sw) + '×' + Math.round(sh);
+        applyLayerTransforms();
+      }
+      function applyLayerTransforms() {
+        layersSceneEl.style.transform = 'scale(' + layZoom + ') rotateX(' + layRotX + 'deg) rotateY(' + layRotY + 'deg)';
+        // Spread by paint order (0..1), so occlusion matches the real screen and
+        // the spacing is independent of how many nodes there are.
+        for (const d of layersSceneEl.children) {
+          const z = (d._order / layMaxOrder) * layExplode;
+          d.style.transform = 'translateZ(' + z + 'px)';
+        }
+        layersZoomValEl.textContent = Math.round(layZoom * 100) + '%';
+      }
+      // One selection model drives both the 3D slice and the tree row.
+      function selectNode(id) {
+        if (selectedNodeId && layerEls[selectedNodeId]) layerEls[selectedNodeId].classList.remove('sel');
+        if (selectedNodeId && treeRowEls[selectedNodeId]) treeRowEls[selectedNodeId].classList.remove('sel');
+        selectedNodeId = id;
+        const row = treeRowEls[id]; const el = layerEls[id]; const n = row && row._node;
+        if (el) el.classList.add('sel');
+        if (row) { row.classList.add('sel'); row.scrollIntoView({ block: 'nearest' }); }
+        if (!n) { layersInfoEl.classList.add('hidden'); clearProps(); return; }
+        const frame = Math.round(n.x) + ', ' + Math.round(n.y) + '  ' + Math.round(n.w) + '×' + Math.round(n.h);
+        layersInfoEl.innerHTML = '<div class="li-cls"></div><div class="li-meta">'
+          + frame + ' · depth ' + n.depth + (n.hidden ? ' · hidden' : '') + '</div>';
+        layersInfoEl.querySelector('.li-cls').textContent = n.cls + (n.label ? '  "' + n.label + '"' : '');
+        layersInfoEl.classList.remove('hidden');
+        loadNodeDetail(id);
+      }
+
+      // ---- Properties panel ----
+      // Resets the panel to its empty state and invalidates any in-flight
+      // request so a late response can't repopulate it.
+      function clearProps() {
+        propsReqId++;
+        propsGroupsEl.innerHTML = '';
+        propsHeadEl.textContent = '';
+        propsHeadEl.classList.add('hidden');
+        propsEmptyEl.textContent = 'Select a node to inspect its properties.';
+        propsEmptyEl.classList.remove('hidden');
+      }
+      function fmt1(v) { return (Math.round(v * 100) / 100).toString(); }
+      function hex2(v) {
+        const n = Math.max(0, Math.min(255, Math.round(v * 255)));
+        return n.toString(16).padStart(2, '0');
+      }
+      // Renders one attribute's value into a cell by its discriminated-union
+      // type ({type, data}). Built via DOM nodes (no innerHTML) so view-supplied
+      // strings can't inject markup.
+      function fmtValueInto(td, attr) {
+        const val = attr && attr.value;
+        if (!val) { td.textContent = '—'; return; }
+        const t = val.type, d = val.data;
+        if (t === 'color') {
+          const r = d[0], g = d[1], b = d[2], a = d[3];
+          const chip = document.createElement('span'); chip.className = 'props-swatch';
+          const fill = document.createElement('span'); fill.className = 'props-swatch-fill';
+          fill.style.background = 'rgba(' + Math.round(r*255) + ',' + Math.round(g*255) + ',' + Math.round(b*255) + ',' + a + ')';
+          chip.appendChild(fill);
+          const txt = document.createElement('span');
+          txt.textContent = '#' + hex2(r) + hex2(g) + hex2(b) + (a < 0.999 ? ' · ' + Math.round(a * 100) + '%' : '');
+          td.appendChild(chip); td.appendChild(txt);
+        } else if (t === 'rect') {
+          td.textContent = '(' + fmt1(d[0]) + ', ' + fmt1(d[1]) + ')  ' + fmt1(d[2]) + ' × ' + fmt1(d[3]);
+        } else if (t === 'point') {
+          td.textContent = '(' + fmt1(d[0]) + ', ' + fmt1(d[1]) + ')';
+        } else if (t === 'size') {
+          td.textContent = fmt1(d[0]) + ' × ' + fmt1(d[1]);
+        } else if (t === 'insets') {
+          td.textContent = 'top ' + fmt1(d[0]) + ' · left ' + fmt1(d[1]) + ' · bottom ' + fmt1(d[2]) + ' · right ' + fmt1(d[3]);
+        } else if (t === 'bool') {
+          const s = document.createElement('span');
+          s.className = d ? 'props-bool-on' : 'props-bool-off';
+          s.textContent = d ? 'on' : 'off';
+          td.appendChild(s);
+        } else if (t === 'double') {
+          td.textContent = fmt1(d);
+        } else {
+          // int, string (incl. enum cases) — render as-is.
+          td.textContent = String(d);
+        }
+      }
+      function renderProps(detail) {
+        propsEmptyEl.classList.add('hidden');
+        propsHeadEl.innerHTML = '';
+        const title = document.createElement('span');
+        title.className = 'props-head-title';
+        title.textContent = detail.className || '(unknown)';
+        propsHeadEl.appendChild(title);
+        // The captured per-node slice already rides along in the hierarchy data,
+        // so offer a one-click download when this node has an image.
+        const nodeId = selectedNodeId;
+        const node = treeRowEls[nodeId] && treeRowEls[nodeId]._node;
+        if (node && node.img) {
+          const dl = document.createElement('button');
+          dl.className = 'props-dl';
+          dl.title = 'Download node image (with subviews)';
+          dl.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>';
+          dl.onclick = () => downloadNodeImage(node, nodeId);
+          propsHeadEl.appendChild(dl);
+        }
+        propsHeadEl.classList.remove('hidden');
+        propsGroupsEl.innerHTML = '';
+        for (const group of (detail.groups || [])) {
+          const card = document.createElement('div'); card.className = 'props-group';
+          const head = document.createElement('div'); head.className = 'props-group-head';
+          const caret = document.createElement('span'); caret.className = 'pg-caret'; caret.textContent = '▼';
+          const title = document.createElement('span'); title.textContent = group.title;
+          head.appendChild(caret); head.appendChild(title);
+          head.onclick = () => card.classList.toggle('collapsed');
+          const body = document.createElement('div'); body.className = 'props-group-body';
+          for (const section of (group.sections || [])) {
+            if (section.title) {
+              const st = document.createElement('div'); st.className = 'props-section-title';
+              st.textContent = section.title; body.appendChild(st);
+            }
+            for (const attr of (section.attributes || [])) {
+              const row = document.createElement('div'); row.className = 'props-attr';
+              const k = document.createElement('div'); k.className = 'props-k'; k.textContent = attr.title;
+              const v = document.createElement('div'); v.className = 'props-v'; fmtValueInto(v, attr);
+              row.appendChild(k); row.appendChild(v); body.appendChild(row);
+            }
+          }
+          card.appendChild(head); card.appendChild(body);
+          propsGroupsEl.appendChild(card);
+        }
+      }
+      // Keep only filename-safe characters so a class name (which may contain
+      // generics, spaces, angle brackets) is a usable download name.
+      function safeFileName(s) {
+        let out = '';
+        for (const c of (s || '')) {
+          out += (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c === '-' || c === '_' ? c : '-';
+        }
+        return out || 'node';
+      }
+      function saveHref(href, cls, ext, revoke) {
+        const a = document.createElement('a');
+        a.href = href;
+        a.download = safeFileName(shortCls(cls)) + '.' + ext;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        if (revoke) URL.revokeObjectURL(href);
+      }
+      // Downloads the node's *group* image — the view rendered together with its
+      // subtree — fetched HD and on demand from /node/<id>/image. If that's
+      // unavailable (view no longer live), falls back to the solo slice that's
+      // already in the hierarchy payload so a download always produces something.
+      function downloadNodeImage(node, id) {
+        if (!node) return;
+        fetch('/node/' + id + '/image')
+          .then(r => r.ok ? r.blob() : Promise.reject(r.status))
+          .then(blob => saveHref(URL.createObjectURL(blob), node.cls, 'png', true))
+          .catch(() => { if (node.img) saveHref(node.img, node.cls, 'jpg', false); });
+      }
+      // Fetches one node's attributes. Guarded by propsReqId so an out-of-order
+      // response (slow node, fast re-select) never overwrites the current one.
+      function loadNodeDetail(id) {
+        const reqId = ++propsReqId;
+        propsHeadEl.classList.add('hidden');
+        propsGroupsEl.innerHTML = '';
+        propsEmptyEl.textContent = 'Loading…';
+        propsEmptyEl.classList.remove('hidden');
+        fetch('/node/' + id).then(r => {
+          if (reqId !== propsReqId) return null;
+          if (r.status === 404) { propsEmptyEl.textContent = 'View no longer live — re-capture.'; return null; }
+          if (!r.ok) { propsEmptyEl.textContent = 'Properties unavailable.'; return null; }
+          return r.json();
+        }).then(detail => {
+          if (!detail || reqId !== propsReqId) return;
+          renderProps(detail);
+        }).catch(() => {
+          if (reqId !== propsReqId) return;
+          propsEmptyEl.textContent = 'Properties unavailable.';
+          propsEmptyEl.classList.remove('hidden');
+        });
+      }
+
+      function setZoom(z) { layZoom = Math.max(0.3, Math.min(5, z)); applyLayerTransforms(); }
+      layersStageEl.addEventListener('pointerdown', (e) => {
+        layDown = { x: e.clientX, y: e.clientY }; layDragged = false; layersStageEl.classList.add('grabbing');
+      });
+      layersStageEl.addEventListener('pointermove', (e) => {
+        if (!layDown) return;
+        const dx = e.clientX - layDown.x, dy = e.clientY - layDown.y;
+        if (Math.abs(dx) + Math.abs(dy) > 3) layDragged = true;
+        layRotY += dx * 0.35; layRotX -= dy * 0.35;
+        layRotX = Math.max(-85, Math.min(85, layRotX));
+        layDown = { x: e.clientX, y: e.clientY };
+        applyLayerTransforms();
+      });
+      function endLayDrag() { layDown = null; layersStageEl.classList.remove('grabbing'); }
+      layersStageEl.addEventListener('pointerup', endLayDrag);
+      layersStageEl.addEventListener('pointerleave', endLayDrag);
+      layersStageEl.addEventListener('pointercancel', endLayDrag);
+      layersStageEl.addEventListener('click', () => {
+        if (layDragged || !selectedNodeId) return;
+        if (layerEls[selectedNodeId]) layerEls[selectedNodeId].classList.remove('sel');
+        if (treeRowEls[selectedNodeId]) treeRowEls[selectedNodeId].classList.remove('sel');
+        selectedNodeId = null; layersInfoEl.classList.add('hidden'); clearProps();
+      });
+      // Wheel zooms the scene.
+      layersStageEl.addEventListener('wheel', (e) => { e.preventDefault(); setZoom(layZoom * (1 - e.deltaY * 0.0015)); }, { passive: false });
+      layersExplodeEl.oninput = () => { layExplode = +layersExplodeEl.value; applyLayerTransforms(); };
+      document.getElementById('layersZoomIn').onclick = () => setZoom(layZoom * 1.2);
+      document.getElementById('layersZoomOut').onclick = () => setZoom(layZoom / 1.2);
+      document.getElementById('layersReset').onclick = () => {
+        layRotX = -16; layRotY = 24; layExplode = 700; layZoom = 1; layersExplodeEl.value = 700; applyLayerTransforms();
+      };
+      document.getElementById('layersRefresh').onclick = () => loadLayers(true);
+      // Resize the hierarchy panel by dragging the divider.
+      const layersResizerEl = document.getElementById('layersResizer');
+      let rzDown = null;
+      layersResizerEl.addEventListener('pointerdown', (e) => {
+        rzDown = { x: e.clientX, w: layersTreeEl.offsetWidth };
+        layersResizerEl.classList.add('drag');
+        layersResizerEl.setPointerCapture(e.pointerId);
+        e.preventDefault();
+      });
+      layersResizerEl.addEventListener('pointermove', (e) => {
+        if (!rzDown) return;
+        const w = Math.max(140, Math.min(640, rzDown.w + (e.clientX - rzDown.x)));
+        layersTreeEl.style.flexBasis = w + 'px';
+      });
+      function endRz() { rzDown = null; layersResizerEl.classList.remove('drag'); }
+      layersResizerEl.addEventListener('pointerup', endRz);
+      layersResizerEl.addEventListener('pointercancel', endRz);
 
       // ---- filter / clear ----
       function applyFilter() {
