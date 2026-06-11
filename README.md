@@ -2,10 +2,11 @@
 
 The iOS SDK for [Xpector](https://github.com/arimunandar/xpector) — a real-time iOS debugging tool. Drop it into any app and instantly stream logs, network traffic, view hierarchy, navigation flow, performance metrics, and more to the Xpector Mac app — **or** review them right inside your app with the built-in **on-device inspector** (no Mac required).
 
-Two ways to use it:
+Three ways to use it:
 
 1. **Mac app** — connect over USB/WiFi for the full inspector (hierarchy, automation, recording, remote viewing). See [Quick Start](#quick-start).
 2. **On-device inspector** — open a Wormholy-style panel inside your app to review Network, Logs, Leaks, and Storage on the device itself. See [On-Device Inspector](#on-device-inspector-no-mac-required).
+3. **Browser viewer** — open a URL on any device on the same WiFi for a live, read-only inspector: Logs, Network, Leaks, Current screen, Navigation flow, and an interactive **3D view hierarchy with a property inspector**. No Mac, no cloud, no USB. See [Browser viewer](#watch-everything-in-any-browser-same-wifi).
 
 ## Installation
 
@@ -101,31 +102,84 @@ Crash]`** entry — with the signal name and a backtrace — in the **Logs** tab
 Tap it for the full, copyable stack trace. (Capturing a crash requires running
 without the Xcode debugger attached, which otherwise intercepts the signal.)
 
-## Watch logs & network in any browser (same WiFi)
+## Watch everything in any browser (same WiFi)
 
 XpectorKit also serves a **read-only live viewer over plain HTTP** — no Mac app,
 no cloud, no USB. On DEBUG builds it's on by default. When the server starts it
 prints a URL:
 
 ```
-[Xpector] Log stream: http://192.168.1.42:47267/
+[Xpector] Log stream: http://192.168.1.42:47265/
 ```
 
-Open that URL in **any browser on the same WiFi** (your laptop, a tablet, a
-second phone) and watch, live, via Server-Sent Events:
+Open it in **any browser on the same WiFi** (your laptop, a tablet, a second
+phone) and you get a full live inspector, streamed via Server-Sent Events:
 
-- **Logs** — `print` / `NSLog` / `os_log` / crash lines, with level coloring.
-- **Network requests** — each request as a `METHOD status url duration` row;
-  click one to expand its headers and request/response body previews. Bodies and
-  sensitive headers are **redacted on egress**, the same as what's sent to the
-  Mac/remote inspector.
+| Tab | What you see |
+|---|---|
+| **Logs** | `print` / `NSLog` / `os_log` / crash lines, level-colored, with a text filter and autoscroll. |
+| **Network** | Each request as a `METHOD status url duration` row; click to expand headers and request/response bodies (pretty-printed JSON), with copy-as-cURL. Bodies and sensitive headers are **redacted on egress**. |
+| **Leaks** | View controllers that failed to deallocate, with instance counts. |
+| **Current** | A live screenshot of the running screen, refreshed continuously. |
+| **Flow** | The navigation trail (push / pop / present / dismiss / tab) with VC names, timing, and screen thumbnails. |
+| **Layers** | An interactive **3D exploded view hierarchy** + tree with a property inspector (see below). |
 
-A text filter spans both, there's an autoscroll toggle, and a recent buffer of
-logs **and** requests replays on connect so you immediately see context. The
-browser auto-reconnects after a backgrounded app foregrounds. From the iOS
-Simulator, the host shares loopback — open `http://localhost:47267/`.
+A recent buffer of logs and requests replays on connect, and the viewer
+auto-reconnects after the app returns from the background. From the iOS
+Simulator the host shares loopback — open `http://localhost:47265/`.
 
-- **Port** is derived automatically: `inspection port + 101` (e.g. `47267`).
+### Layers — 3D hierarchy & property inspector
+
+The **Layers** tab renders the live view tree as a rotatable, zoomable,
+explodable 3D stack of per-component slices alongside a hierarchy tree. It
+re-captures on open so it always matches the running UI.
+
+- **Select any node** (in the tree or by clicking a slice) to open a
+  **Properties** panel — a Lookin-style grouped attribute inspector showing
+  **Layout** (frame, bounds, safe-area insets, intrinsic size,
+  content-hugging/resistance), **View / Layer** (alpha, hidden, corner radius,
+  border, background / tint / shadow colors as swatches…), **Accessibility**,
+  plus **type-specific** groups for `UILabel`, `UIControl`, `UIButton`,
+  `UIScrollView`, `UITableView`, `UICollectionView`, `UIStackView`,
+  `UITextField`, `UITextView`, `UIImageView`, `UISwitch`, `UISlider`, and
+  `UISegmentedControl`. Colors render as swatches; geometry, enum, and bool
+  values are formatted. (Read-only.)
+- **Download** the selected node's image — its **group render** (the view *with*
+  its subtree), saved as a PNG — from the panel header.
+- **Live** toggle (on by default): the hierarchy **auto-refreshes when the
+  screen changes** — it polls and rebuilds only on a real change (preserving
+  your camera and selection) and refreshes instantly on navigation. It pauses
+  while you drag or when the browser tab is hidden.
+
+> Component slices are alpha-correct: a view is shown exactly as it paints
+> itself, so structural wrappers and system-painted backgrounds (those whose own
+> `backgroundColor` is clear) render transparent rather than as opaque white
+> blocks. On a narrow window the Properties panel becomes a bottom sheet.
+
+### Share the URL on-device (QR + copy)
+
+You don't have to read the URL out of the Xcode console — get it in code, or
+present a ready-made connection sheet inside your app:
+
+```swift
+import XpectorServer
+
+// The viewer URL, or nil if the viewer isn't running — e.g. for your own debug UI:
+let url = XpectorServer.shared.logViewerURL()      // http://192.168.1.42:47265/
+
+// Or present a sheet with a scannable QR code + the URL + Copy / Open actions:
+XpectorServer.shared.presentLogViewer()
+```
+
+`presentLogViewer()` shows a bottom sheet with a **QR code**, the URL, and
+**Copy** / **Open** buttons — scan it from another device to open the viewer
+instantly. It returns `false` (without presenting) when the viewer isn't running.
+
+### Ports & opt-out
+
+- **Port** is derived automatically: `inspection port + 101` (e.g. `47265`).
+  If the base port is taken it shifts up — `logViewerURL()` always reports the
+  real one.
 - **Opt out:** set `enableLocalLogStream = false` on your `XPConfiguration`, or
   set `XPECTOR_LOG_STREAM_DISABLED=1` in the scheme environment to keep
   auto-start but not open the HTTP port.
@@ -388,7 +442,9 @@ XpectorKit/
 │       ├── XPOSLogCapture     # os_log
 │       ├── XPNetworkCapture   # HTTP monitoring
 │       ├── XPNavigationCapture# VC transitions
-│       ├── XPHierarchyCapture # View tree snapshots
+│       ├── XPHierarchyCapture # View tree snapshots + per-node slices
+│       ├── XPAttributeBuilder  # Grouped view attributes (Layers inspector)
+│       ├── XPLogViewerSheet    # On-device QR/URL connect sheet
 │       ├── XPPerformanceCapture# FPS, memory
 │       ├── XPLeakDetector     # VC dealloc tracking
 │       ├── XPHangDetector     # Main thread watchdog
