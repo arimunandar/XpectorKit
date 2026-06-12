@@ -1,5 +1,6 @@
 import SwiftUI
 import XpectorServer
+import XpectorKit
 
 @main
 struct XpectorDemoApp: App {
@@ -8,12 +9,18 @@ struct XpectorDemoApp: App {
         // startForDevelopment() opts non-DEBUG configs (e.g. Staging) in.
         // The #if strips this entirely from Release, where XPECTOR_ENABLED is undefined.
         // (In plain DEBUG builds this is optional — the package auto-starts.)
-        XpectorServer.shared.startForDevelopment()
+        var config = XPConfiguration()
+        // Opt into the cloud relay only when an ingest key is provided via the
+        // environment — keeps the secret out of source. e.g. run with
+        // SIMCTL_CHILD_XP_RELAY_KEY=<key> (and optional SIMCTL_CHILD_XP_RELAY_URL).
+        let env = ProcessInfo.processInfo.environment
+        if let key = env["XP_RELAY_KEY"], !key.isEmpty {
+            config.enableCloudRelay = true
+            config.cloudRelayBaseURL = env["XP_RELAY_URL"] ?? "https://relay.xpector.cloud"
+            config.cloudRelayIngestKey = key
+        }
+        XpectorServer.shared.startForDevelopment(config: config)
         #endif
-
-        // Shake the device (Simulator: Device ▸ Shake, ⌃⌘Z) to open the
-        // on-device inspector — Network · Logs · Leaks · Storage.
-        XpectorServer.shared.enableShakeToInspect()
     }
 
     var body: some Scene {

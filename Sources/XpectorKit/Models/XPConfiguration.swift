@@ -14,6 +14,15 @@ public struct XPConfiguration: Sendable {
     /// so any browser on the same WiFi can watch live logs — no Mac app, no
     /// cloud, no USB. DEBUG-gated and same-LAN-trust like the rest of the SDK.
     public var enableLocalLogStream: Bool
+    /// Streams the same logs/network/leaks/flow to a Cloudflare relay so a
+    /// browser *off* the LAN (remote tester, shared session) can watch live.
+    /// Opt-in and DEBUG-only — requires `cloudRelayBaseURL` + `cloudRelayIngestKey`,
+    /// and the ingest key must never ship in a Release/App Store build.
+    public var enableCloudRelay: Bool
+    /// Base URL of the relay, e.g. `https://relay.xpector.cloud`.
+    public var cloudRelayBaseURL: String?
+    /// Dev ingest key (Cloudflare Worker secret `INGEST_KEY`). DEBUG builds only.
+    public var cloudRelayIngestKey: String?
     public var logBufferSize: Int
     public var networkBufferSize: Int
     public var hangThresholdMs: Int
@@ -30,6 +39,9 @@ public struct XPConfiguration: Sendable {
         enableHangDetection: Bool = false,
         enableLeakDetection: Bool = true,
         enableLocalLogStream: Bool = true,
+        enableCloudRelay: Bool = false,
+        cloudRelayBaseURL: String? = nil,
+        cloudRelayIngestKey: String? = nil,
         logBufferSize: Int = 100,
         networkBufferSize: Int = 200,
         hangThresholdMs: Int = 500,
@@ -45,6 +57,9 @@ public struct XPConfiguration: Sendable {
         self.enableHangDetection = enableHangDetection
         self.enableLeakDetection = enableLeakDetection
         self.enableLocalLogStream = enableLocalLogStream
+        self.enableCloudRelay = enableCloudRelay
+        self.cloudRelayBaseURL = cloudRelayBaseURL
+        self.cloudRelayIngestKey = cloudRelayIngestKey
         self.logBufferSize = logBufferSize
         self.networkBufferSize = networkBufferSize
         self.hangThresholdMs = hangThresholdMs

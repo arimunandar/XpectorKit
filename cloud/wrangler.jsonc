@@ -1,0 +1,44 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "xpector-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-12-30",
+  "observability": {
+    "enabled": true
+  },
+
+  // Custom domain is attached at deploy time (see cloud/README.md).
+  // Until then `wrangler dev` serves on localhost and the worker is
+  // also reachable at https://xpector-relay.<your-subdomain>.workers.dev
+  "routes": [
+    {
+      "pattern": "relay.xpector.cloud",
+      "custom_domain": true
+    }
+  ],
+
+  // Serve the viewer page (the real LAN viewer HTML) as a text module.
+  "rules": [
+    { "type": "Text", "globs": ["**/*.html"] }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "RELAY", "class_name": "XPSessionRelay" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["XPSessionRelay"] }
+  ],
+
+  "vars": {
+    // Public base used to build viewer links. Override per-env if needed.
+    "PUBLIC_BASE": "https://relay.xpector.cloud",
+    // Viewer-link lifetime in seconds (short-lived by design).
+    "VIEWER_TTL_SECONDS": "1800"
+  }
+
+  // Secrets (set via `wrangler secret put`, NOT committed):
+  //   INGEST_KEY    - dev API key baked into DEBUG app builds only
+  //   TOKEN_SECRET  - HMAC key used to sign/verify short-lived viewer tokens
+}

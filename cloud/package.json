@@ -1,0 +1,17 @@
+{
+  "name": "xpector-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ephemeral live debug-stream relay for XpectorKit (DEBUG-only). App pushes log/net/leak/nav events over WebSocket; browsers read them over SSE.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240909.0",
+    "typescript": "^5.6.0",
+    "wrangler": "^4.0.0"
+  }
+}

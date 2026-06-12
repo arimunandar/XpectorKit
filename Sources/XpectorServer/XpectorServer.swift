@@ -32,6 +32,9 @@ public final class XpectorServer: @unchecked Sendable {
     private var bonjourPublisher: XPBonjourPublisher?
     private var wifiServer: XPWiFiServer?
     private var httpLogServer: XPHttpLogServer?
+    /// Outbound cloud-relay client (DEBUG-only; created only when
+    /// `enableCloudRelay` is set with a base URL + ingest key). nil in Release.
+    private var cloudRelay: XPCloudRelayClient?
     #if DEBUG
     private var keychainCapture: XPKeychainCapture?
     #endif
@@ -103,6 +106,40 @@ public final class XpectorServer: @unchecked Sendable {
         guard let port = httpLogServer?.actualPort, port > 0 else { return nil }
         let host = xpLocalWiFiAddress() ?? "localhost"
         return URL(string: "http://\(host):\(port)/")
+    }
+
+    /// The cloud share link for the current session — a `relay.xpector.cloud`
+    /// URL any browser can open to watch this device live, even off-LAN.
+    ///
+    /// Returns `nil` until the relay has connected and minted a session, or when
+    /// the cloud relay is disabled (`enableCloudRelay == false`) or running in a
+    /// Release build. The token in the link is short-lived. Use it to show the
+    /// link in your own debug UI; see also `presentCloudViewer(from:)`.
+    public func cloudViewerURL() -> URL? {
+        cloudRelay?.currentViewerURL
+    }
+
+    /// Whether the cloud relay is configured and ready to mint a share link
+    /// (`enableCloudRelay` + base URL + ingest key, in a DEBUG build). True does
+    /// not mean a link exists yet — call `generateCloudViewer` to provision one.
+    public var isCloudRelayConfigured: Bool { cloudRelay != nil }
+
+    /// Provisions the cloud share link **on demand** — the relay stays idle (no
+    /// outbound connection, no public URL) until this is called, e.g. when the
+    /// user taps "Generate" on the connect sheet. If a link already exists it is
+    /// returned unchanged. `completion` runs on the main thread with the URL, or
+    /// nil if the relay isn't configured / minting failed. DEBUG-only.
+    public func generateCloudViewer(completion: @escaping (URL?) -> Void) {
+        guard let cloudRelay else { completion(nil); return }
+        cloudRelay.generate(completion: completion)
+    }
+
+    /// Mints a fresh cloud share link and **revokes the previous one** (the old
+    /// link immediately stops working). `completion` runs on the main thread
+    /// with the new URL, or nil if the cloud relay isn't connected. DEBUG-only.
+    public func regenerateCloudViewer(completion: @escaping (URL?) -> Void) {
+        guard let cloudRelay else { completion(nil); return }
+        cloudRelay.regenerate(completion: completion)
     }
 
     /// Entry point for the DEBUG zero-code auto-start. No-op if the host
@@ -204,14 +241,32 @@ public final class XpectorServer: @unchecked Sendable {
         publisher.start()
         bonjourPublisher = publisher
 
+        let appName = (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
+            ?? "App"
+
+        // The on-demand pull providers (current screen, Layers hierarchy, node
+        // attributes, node group image). Shared by the LAN HTTP server and the
+        // cloud relay so both viewers have the same Current/Layers tabs. All
+        // gated on the navigation-screenshot opt-in (same content class).
+        let screenshotProvider: () -> Data? = config.enableNavigationScreenshots
+            ? { [weak self] in self?.currentScreenJPEG() }
+            : { nil }
+        let layersProvider: ((@escaping (Data?) -> Void) -> Void)? = config.enableNavigationScreenshots
+            ? { completion in XpectorServer.captureLayersJSON(completion) }
+            : nil
+        let nodeDetailProvider: ((String, @escaping (Data?) -> Void) -> Void)? = config.enableNavigationScreenshots
+            ? { id, completion in XpectorServer.captureNodeDetailJSON(id, completion) }
+            : nil
+        let nodeImageProvider: ((String, @escaping (Data?) -> Void) -> Void)? = config.enableNavigationScreenshots
+            ? { id, completion in XpectorServer.captureNodeGroupImage(id, completion) }
+            : nil
+
         // LAN HTTP/SSE log viewer — open the printed URL in any browser on the
         // same WiFi to watch live logs (no Mac app, no cloud, no USB). Read-only;
         // same trust boundary as the WiFi server above.
         if config.enableLocalLogStream {
             let httpPort = conn.actualPort + 101
-            let appName = (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
-                ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
-                ?? "App"
             let httpServer = XPHttpLogServer(
                 port: httpPort,
                 appName: appName,
@@ -223,28 +278,10 @@ public final class XpectorServer: @unchecked Sendable {
                 },
                 recentLeaks: { XPInAppLeakStore.shared.entries() },
                 recentNav: { [weak self] in self?.getRecentNavEvents() ?? [] },
-                // The live Current-screen feed reuses the navigation-screenshot
-                // opt-in, so disabling screenshots disables it too.
-                currentScreenshot: config.enableNavigationScreenshots
-                    ? { [weak self] in self?.currentScreenJPEG() }
-                    : { nil },
-                // The Layers tab renders per-component slices, the same content
-                // class as screenshots — so gate it on the screenshot opt-in too.
-                layersJSON: config.enableNavigationScreenshots
-                    ? { completion in XpectorServer.captureLayersJSON(completion) }
-                    : nil,
-                // Per-node attribute groups for the Layers tab's Properties
-                // panel. Same content class as the slices/screenshots, so it
-                // rides the same opt-in.
-                nodeDetailJSON: config.enableNavigationScreenshots
-                    ? { id, completion in XpectorServer.captureNodeDetailJSON(id, completion) }
-                    : nil,
-                // The selected node's group image (the view rendered *with* its
-                // subtree) for the Properties panel's download button — rendered
-                // on demand, so a node-select stays cheap.
-                nodeImage: config.enableNavigationScreenshots
-                    ? { id, completion in XpectorServer.captureNodeGroupImage(id, completion) }
-                    : nil
+                currentScreenshot: screenshotProvider,
+                layersJSON: layersProvider,
+                nodeDetailJSON: nodeDetailProvider,
+                nodeImage: nodeImageProvider
             )
             httpServer.start()
             httpLogServer = httpServer
@@ -252,6 +289,34 @@ public final class XpectorServer: @unchecked Sendable {
                 print("[Xpector] Log stream: \(url.absoluteString)")
             }
         }
+
+        // Cloud relay — stream the same events AND proxy the same pull endpoints
+        // out to relay.xpector.cloud, so a browser off the LAN gets the full
+        // viewer (Current + Layers included). Opt-in and DEBUG-only: the ingest
+        // key authenticates the producer leg and must never ship in a Release
+        // build, so creation is compiled out entirely.
+        #if DEBUG
+        if config.enableCloudRelay,
+           let baseString = config.cloudRelayBaseURL,
+           let baseURL = URL(string: baseString),
+           let key = config.cloudRelayIngestKey, !key.isEmpty {
+            let relay = XPCloudRelayClient(
+                baseURL: baseURL,
+                ingestKey: key,
+                appName: appName,
+                currentScreenshot: screenshotProvider,
+                layersJSON: layersProvider,
+                nodeDetailJSON: nodeDetailProvider,
+                nodeImage: nodeImageProvider
+            )
+            // Created idle: the relay does NOT dial out or mint a link here.
+            // The user provisions a share link on demand from the connect sheet
+            // (presentLogViewer → "Generate"), so nothing leaves the device until
+            // explicitly requested.
+            cloudRelay = relay
+            print("[Xpector] Cloud relay enabled (\(baseString)) — open the connect sheet (presentLogViewer) and tap Generate to mint a share link.")
+        }
+        #endif
 
         foregroundObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.willEnterForegroundNotification,
@@ -300,6 +365,7 @@ public final class XpectorServer: @unchecked Sendable {
                 // Redact on egress — the buffer is raw for the on-device inspector.
                 let safe = XPNetworkCapture.redactedEntry(entry)
                 self?.httpLogServer?.pushNetwork(safe)
+                self?.cloudRelay?.pushNetwork(safe)
                 guard let msg = try? XPMessage(type: .networkEvent, content: safe) else { return }
                 self?.broadcast(message: msg)
             }
@@ -316,6 +382,7 @@ public final class XpectorServer: @unchecked Sendable {
             let nav = XPNavigationCapture(captureScreenshots: config.enableNavigationScreenshots) { [weak self] event in
                 self?.recordNavEvent(event)
                 self?.httpLogServer?.pushNav(event)
+                self?.cloudRelay?.pushNav(event)
                 guard let msg = try? XPMessage(type: .navEvent, content: event) else { return }
                 self?.broadcast(message: msg)
             }
@@ -330,6 +397,7 @@ public final class XpectorServer: @unchecked Sendable {
                     if event.type == .leak {
                         XPInAppLeakStore.shared.record(event)
                         self?.httpLogServer?.pushLeak(event)
+                        self?.cloudRelay?.pushLeak(event)
                     }
                     guard let msg = try? XPMessage(type: .perfEvent, content: event) else { return }
                     self?.broadcast(message: msg)
@@ -368,6 +436,7 @@ public final class XpectorServer: @unchecked Sendable {
                 let leak = XPLeakDetector(checkDelayMs: delayMs) { [weak self] event in
                     XPInAppLeakStore.shared.record(event)
                     self?.httpLogServer?.pushLeak(event)
+                    self?.cloudRelay?.pushLeak(event)
                     guard let msg = try? XPMessage(type: .perfEvent, content: event) else { return }
                     self?.broadcast(message: msg)
                 }
@@ -414,6 +483,8 @@ public final class XpectorServer: @unchecked Sendable {
             bonjourPublisher = nil
             httpLogServer?.stop()
             httpLogServer = nil
+            cloudRelay?.stop()
+            cloudRelay = nil
             if let obs = foregroundObserver {
                 NotificationCenter.default.removeObserver(obs)
             }
@@ -603,6 +674,7 @@ public final class XpectorServer: @unchecked Sendable {
         logBufferLock.unlock()
 
         httpLogServer?.push(entry)
+        cloudRelay?.push(entry)
 
         guard let message = try? XPMessage(type: type, content: entry) else { return }
         cachedConnection?.send(message: message)
