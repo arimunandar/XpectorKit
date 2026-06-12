@@ -5,7 +5,7 @@ The iOS SDK for [Xpector](https://github.com/arimunandar/xpector) — a real-tim
 Two ways to use it:
 
 1. **Mac app** — connect over USB/WiFi for the full inspector (hierarchy, automation, recording, remote viewing). See [Quick Start](#quick-start).
-2. **Browser viewer** — open a URL on any device on the same WiFi for a live, read-only inspector: Logs, Network, Leaks, Current screen, Navigation flow, and an interactive **3D view hierarchy with a property inspector**. No Mac, no USB. See [Browser viewer](#watch-everything-in-any-browser-same-wifi). For watching from **any network** (off-LAN — remote tester, cellular), see the [Cloud relay](#cloud-relay--watch-from-any-network-off-lan).
+2. **Browser viewer** — open a URL on any device on the same WiFi for a live, read-only inspector: Logs, Network, **WebSockets (with schema-less protobuf decoding)**, Leaks, Current screen, Navigation flow, and an interactive **3D view hierarchy with a property inspector**. No Mac, no USB. See [Browser viewer](#watch-everything-in-any-browser-same-wifi). For watching from **any network** (off-LAN — remote tester, cellular), see the [Cloud relay](#cloud-relay--watch-from-any-network-off-lan).
 
 ## Installation
 
@@ -83,6 +83,7 @@ phone) and you get a full live inspector, streamed via Server-Sent Events:
 |---|---|
 | **Logs** | `print` / `NSLog` / `os_log` / crash lines, level-colored, with a text filter and autoscroll. |
 | **Network** | Each request as a `METHOD status url duration` row; click to expand headers and request/response bodies (pretty-printed JSON), with copy-as-cURL. Bodies and sensitive headers are **redacted on egress**. |
+| **Sockets** | WebSocket connections grouped by socket → a per-message timeline (direction, text/binary, size, time, newest first). Binary frames are decoded to a **protobuf field tree** with no schema, and a per-message **Protobuf / Text / Hex / Base64** toggle. Payloads redacted on egress. |
 | **Leaks** | View controllers that failed to deallocate, with instance counts. |
 | **Current** | A live screenshot of the running screen, refreshed continuously. |
 | **Flow** | The navigation trail (push / pop / present / dismiss / tab) with VC names, timing, and screen thumbnails. |
@@ -257,17 +258,20 @@ tenant isolation) is in [`cloud/README.md`](cloud/README.md).
 > isolated. Still, a cloud link is more exposed than a LAN socket — only generate
 > one when you mean to share.
 
-## On-device inspector (Logs · Network)
+## On-device inspector (Network · Sockets · Logs)
 
 Sometimes you want to inspect **on the device itself** — no second screen, no
-browser, no network. Xpector ships a native, in-app inspector with **Logs** and
-**Network** tabs (a Wormholy-style request list with a Postman-style detail view:
-headers, request/response bodies, syntax-highlighted JSON, and copy-as-cURL). It
-reads the raw capture buffers, so you see full-fidelity traffic for your own app
+browser, no network. Xpector ships a native, in-app inspector with **Network**,
+**Sockets**, and **Logs** tabs. Network is a Wormholy-style request list with a
+Postman-style detail view (headers, request/response bodies, syntax-highlighted
+JSON, copy-as-cURL); Sockets groups WebSocket connections into per-message
+timelines and walks decoded protobuf frames in an `OutlineGroup` tree. It reads
+the raw capture buffers, so you see full-fidelity traffic for your own app
 — nothing leaves the device.
 
 ```swift
-XpectorServer.shared.presentInspector()           // opens to Network (Logs tab alongside)
+XpectorServer.shared.presentInspector()           // opens to Network
+XpectorServer.shared.presentInspector(initialTab: .sockets)
 XpectorServer.shared.presentInspector(initialTab: .logs)
 XpectorServer.shared.presentNetworkInspector()     // straight to Network
 ```
@@ -277,8 +281,8 @@ XpectorServer.shared.presentNetworkInspector()     // straight to Network
 - **Shake to open:** `XpectorServer.shared.enableShakeToInspect()` — shaking the
   device presents the inspector from anywhere.
 
-Presenting starts network capture if it isn't already running. The inspector is
-scoped to **Logs + Network**; the [browser viewer](#watch-everything-in-any-browser-same-wifi)
+Presenting starts network + WebSocket capture if it isn't already running. The
+inspector is scoped to **Network + Sockets + Logs**; the [browser viewer](#watch-everything-in-any-browser-same-wifi)
 covers the richer tabs (Layers, Flow, Leaks, Current).
 
 ## Enabling in non-Release configurations
@@ -413,6 +417,7 @@ if AppEnvironment.current != .production {
 |---|---|---|
 | **Logs** | `print()`, `NSLog()`, `os_log` | Yes |
 | **Network** | HTTP requests/responses with headers and body previews | Yes |
+| **WebSockets** | `URLSessionWebSocketTask` connections + messages, with schema-less protobuf decoding of binary frames | Yes (DEBUG) |
 | **View Hierarchy** | Full UIKit + SwiftUI view tree with frames, accessibility, screenshots | On demand |
 | **Navigation Flow** | Push, pop, present, dismiss, tab switch with VC names and timing | Yes |
 | **Performance** | FPS, memory footprint, dropped frames | Yes |
@@ -434,6 +439,41 @@ session.dataTask(with: URL(string: "https://api.example.com/data")!) { data, res
     // Your code — the request is automatically captured
 }.resume()
 ```
+
+## WebSocket Capture
+
+`URLSessionWebSocketTask` bypasses `URLProtocol` entirely, so Xpector captures
+it with a dedicated **DEBUG-only** swizzle — connections, every `send`/`receive`
+(both the completion-handler and `async` APIs), and close. **Zero code:** your
+existing WebSockets just appear in the **Sockets** tab.
+
+```swift
+// Plain URLSession WebSocket — captured automatically, no SDK calls:
+let task = URLSession.shared.webSocketTask(with: URL(string: "wss://api.example.com/feed")!)
+task.resume()
+task.send(.string("subscribe")) { _ in }
+```
+
+**Schema-less protobuf decoding.** Binary frames are run through a
+dependency-free decoder that walks the wire format (varint / fixed32 / fixed64 /
+length-delimited, with nested messages and repeated fields) into a field-number
+tree — **no `.proto` schema required**. A heuristic skips plain text/JSON and
+rejects non-protobuf bytes, and the raw bytes are always carried so the viewers
+can switch between **Protobuf tree / Text / Hex / Base64** even on a wrong guess.
+
+The swizzle resolves Apple's private concrete task class at runtime (via
+`object_getClass`, never a private symbol) and is **entirely `#if DEBUG`**, so
+nothing ships in Release. If you'd rather not rely on the swizzle, use the
+explicit fallback wrapper:
+
+```swift
+let ws = XPNetworkCapture.shared.monitoredWebSocketTask(with: url)
+ws.resume()
+ws.send(.string("hello")) { _ in }
+ws.receive { result in /* … */ }
+```
+
+Disable WebSocket capture independently with `enableWebSocketCapture = false`.
 
 ## Structured Logging
 
@@ -457,6 +497,7 @@ var config = XPConfiguration()
 config.port = 47164                           // default
 config.enableNetworkCapture = true            // HTTP tracking
 config.enableAutomaticNetworkInterception = true  // URLSession swizzle
+config.enableWebSocketCapture = true          // WebSocket + protobuf (DEBUG; needs network capture)
 config.enableNavigationCapture = true         // VC transitions
 config.enablePerformanceCapture = true        // FPS + memory
 config.enableLeakDetection = true             // VC dealloc checks
@@ -530,6 +571,9 @@ XpectorKit/
 │       ├── XPLogCapture       # stdout/stderr
 │       ├── XPOSLogCapture     # os_log
 │       ├── XPNetworkCapture   # HTTP monitoring
+│       ├── XPWebSocketInterceptor # WebSocket swizzle + proxy fallback (DEBUG)
+│       ├── XPWebSocketCapture  # WebSocket event sink
+│       ├── XPProtobufDecoder   # Schema-less protobuf → field tree
 │       ├── XPNavigationCapture# VC transitions
 │       ├── XPHierarchyCapture # View tree snapshots + per-node slices
 │       ├── XPAttributeBuilder  # Grouped view attributes (Layers inspector)
