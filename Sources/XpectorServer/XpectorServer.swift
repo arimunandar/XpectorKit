@@ -32,9 +32,10 @@ public final class XpectorServer: @unchecked Sendable {
     private var bonjourPublisher: XPBonjourPublisher?
     private var wifiServer: XPWiFiServer?
     private var httpLogServer: XPHttpLogServer?
-    /// Outbound cloud-relay client (created only in DEBUG or XPECTOR_ENABLED
-    /// builds, when `enableCloudRelay` is set with a base URL + ingest key).
-    /// nil in Release.
+    /// Outbound cloud-relay client. Created only when `enableCloudRelay` is set
+    /// (with a base URL + ingest key) and `startForDevelopment`/`start` is
+    /// called — both host-controlled and intended for non-production configs.
+    /// nil otherwise.
     private var cloudRelay: XPCloudRelayClient?
     #if DEBUG
     private var keychainCapture: XPKeychainCapture?
@@ -298,11 +299,14 @@ public final class XpectorServer: @unchecked Sendable {
 
         // Cloud relay — stream the same events AND proxy the same pull endpoints
         // out to relay.xpector.cloud, so a browser off the LAN gets the full
-        // viewer (Current + Layers included). Opt-in: the ingest key authenticates
-        // the producer leg and must never ship in a Release/App Store build, so
-        // creation is compiled out unless the build defines DEBUG or the host's
-        // XPECTOR_ENABLED flag (intended for dev/staging/QA configs, never Release).
-        #if DEBUG || XPECTOR_ENABLED
+        // viewer (Current + Layers included). Gated at RUNTIME by
+        // `config.enableCloudRelay` (default false) rather than `#if DEBUG`, so it
+        // also works in release-class dev configs (Staging/Canary) where SPM
+        // doesn't propagate the host's DEBUG/XPECTOR_ENABLED flags to this package.
+        // The ingest key authenticates the producer leg, so hosts MUST only set
+        // enableCloudRelay (and call startForDevelopment) in non-production
+        // configs — never an App Store build. Nothing dials out until the user
+        // taps Generate in the connect sheet.
         if config.enableCloudRelay,
            let baseString = config.cloudRelayBaseURL,
            let baseURL = URL(string: baseString),
@@ -323,7 +327,6 @@ public final class XpectorServer: @unchecked Sendable {
             cloudRelay = relay
             print("[Xpector] Cloud relay enabled (\(baseString)) — open the connect sheet (presentLogViewer) and tap Generate to mint a share link.")
         }
-        #endif
 
         foregroundObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.willEnterForegroundNotification,
