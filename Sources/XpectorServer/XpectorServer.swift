@@ -85,6 +85,11 @@ public final class XpectorServer: @unchecked Sendable {
     ///   production configuration: it exposes app internals over an
     ///   unauthenticated local socket.
     public func startForDevelopment(config: XPConfiguration = XPConfiguration()) {
+        #if !DEBUG
+        // Loud, unmissable trail in case this ever reaches a production build —
+        // it deliberately defeats the fail-closed Release guard.
+        print("[Xpector] ⚠️ startForDevelopment() is exposing app internals over an UNAUTHENTICATED socket in a non-DEBUG build. This must NEVER run in an App Store / production configuration.")
+        #endif
         XpectorServer.allowInReleaseBuilds = true
         start(config: config)
     }

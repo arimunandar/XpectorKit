@@ -133,7 +133,23 @@ final class XPCloudRelayClient: @unchecked Sendable {
 
     // MARK: - Connection lifecycle (all on `queue`)
 
+    /// Fail closed on a non-TLS relay: the relay carries logs, redacted network
+    /// entries, screenshots, and the full view hierarchy off the device, so a
+    /// misconfigured `http://` / `ws://` base must NOT silently exfiltrate in the
+    /// clear. Plaintext is allowed only for loopback (local `wrangler dev`).
+    private static func isTransportSecure(_ url: URL) -> Bool {
+        let scheme = url.scheme?.lowercased()
+        if scheme == "https" || scheme == "wss" { return true }
+        let host = url.host?.lowercased()
+        return host == "localhost" || host == "127.0.0.1" || host == "::1"
+    }
+
     private func connect() {
+        guard Self.isTransportSecure(baseURL) else {
+            print("[Xpector] Cloud relay refused: \(baseURL.absoluteString) is not TLS (use https://). Plaintext relays are blocked so debug data isn't streamed in the clear.")
+            stopped = true
+            return
+        }
         // Re-joining an existing session keeps the same share link + replay
         // buffer; only mint a new one on the very first connect.
         if let ingest = ingestURL {
@@ -208,6 +224,11 @@ final class XPCloudRelayClient: @unchecked Sendable {
     }
 
     private func openSocket(_ url: URL) {
+        guard Self.isTransportSecure(url) else {
+            print("[Xpector] Cloud relay refused: ingest URL \(url.absoluteString) is not TLS (wss://). Connection aborted.")
+            stopped = true
+            return
+        }
         var req = URLRequest(url: url)
         req.setValue("Bearer \(ingestKey)", forHTTPHeaderField: "Authorization")
         let ws = session.webSocketTask(with: req)

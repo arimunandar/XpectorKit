@@ -102,13 +102,22 @@ function randomId(): string {
   crypto.getRandomValues(bytes);
   return b64urlEncode(bytes);
 }
-function checkIngestKey(request: Request, env: Env): boolean {
+async function checkIngestKey(request: Request, env: Env): Promise<boolean> {
   const auth = request.headers.get("Authorization") ?? "";
   const m = auth.match(/^Bearer\s+(.+)$/i);
   const provided = m ? m[1] : request.headers.get("X-Xpector-Key") ?? "";
-  if (!provided || !env.INGEST_KEY || provided.length !== env.INGEST_KEY.length) return false;
+  if (!provided || !env.INGEST_KEY) return false;
+  // Compare fixed-length SHA-256 digests so neither the length nor the content
+  // of INGEST_KEY leaks via timing (the previous length short-circuit did).
+  const enc = new TextEncoder();
+  const [a, b] = await Promise.all([
+    crypto.subtle.digest("SHA-256", enc.encode(provided)),
+    crypto.subtle.digest("SHA-256", enc.encode(env.INGEST_KEY)),
+  ]);
+  const av = new Uint8Array(a);
+  const bv = new Uint8Array(b);
   let diff = 0;
-  for (let i = 0; i < provided.length; i++) diff |= provided.charCodeAt(i) ^ env.INGEST_KEY.charCodeAt(i);
+  for (let i = 0; i < av.length; i++) diff |= av[i] ^ bv[i];
   return diff === 0;
 }
 
@@ -155,7 +164,7 @@ export default {
 
     // App mints a session.
     if (path === "/api/session" && request.method === "POST") {
-      if (!checkIngestKey(request, env)) return new Response("unauthorized", { status: 401, headers: cors() });
+      if (!(await checkIngestKey(request, env))) return new Response("unauthorized", { status: 401, headers: cors() });
       const sid = randomId();
       const ttl = parseInt(env.VIEWER_TTL_SECONDS || "1800", 10);
       const { token, expMs } = await mintViewerToken(env.TOKEN_SECRET, sid, ttl, now);
@@ -183,7 +192,7 @@ export default {
 
     // App kills a session (on regenerate) — old viewer links stop working.
     if (path === "/api/revoke" && request.method === "POST") {
-      if (!checkIngestKey(request, env)) return new Response("unauthorized", { status: 401, headers: cors() });
+      if (!(await checkIngestKey(request, env))) return new Response("unauthorized", { status: 401, headers: cors() });
       let sid = "";
       try {
         const b = (await request.json()) as { sessionId?: string };
@@ -201,7 +210,7 @@ export default {
       if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
         return new Response("expected websocket", { status: 426, headers: cors() });
       }
-      if (!checkIngestKey(request, env)) return new Response("unauthorized", { status: 401 });
+      if (!(await checkIngestKey(request, env))) return new Response("unauthorized", { status: 401 });
       const sid = decodeURIComponent(path.slice("/ingest/".length));
       if (!sid) return new Response("missing session", { status: 400 });
       return env.RELAY.getByName(sid).fetch(new Request("https://do/ingest", request));
@@ -222,7 +231,20 @@ export default {
       }
       const html = VIEWER_HTML.replaceAll("__XP_APP_NAME__", escapeHtml(name));
       return new Response(html, {
-        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store",
+          // Defense-in-depth: the page is fully first-party, so lock everything
+          // to 'self' (+ data: images, inline script/style the page relies on).
+          // This blocks an XSS from exfiltrating the session token to an
+          // off-origin host (connect-src/img-src 'self') and bars framing.
+          "Content-Security-Policy":
+            "default-src 'none'; connect-src 'self'; img-src 'self' data:; " +
+            "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; " +
+            "font-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+          "X-Content-Type-Options": "nosniff",
+          "Referrer-Policy": "no-referrer",
+        },
       });
     }
 
@@ -292,7 +314,9 @@ export class XPSessionRelay extends DurableObject<Env> {
     this.sessionName = name;
   }
   async getName(): Promise<string> {
-    return this.sessionName;
+    // Don't leak the app name for a killed session (the /v page falls back to a
+    // generic title).
+    return this.revoked ? "" : this.sessionName;
   }
 
   // Kill this session: drop viewers, close the producer, and reject everything
@@ -349,6 +373,11 @@ export class XPSessionRelay extends DurableObject<Env> {
 
   private onProducerMessage(raw: string): void {
     if (raw === "ka" || raw === "") return;
+    // Bound a single frame: device-pull responses carry base64 screenshots /
+    // hierarchies (the largest legit payload ~ a few MB); anything past this is
+    // dropped so a buggy/hostile producer can't balloon DO memory or the replay
+    // buffer. 8 MB covers a full-screen PNG + headroom.
+    if (raw.length > 8 * 1024 * 1024) return;
     let msg: any;
     try {
       msg = JSON.parse(raw);
@@ -426,7 +455,9 @@ export class XPSessionRelay extends DurableObject<Env> {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
         Connection: "keep-alive",
-        "Access-Control-Allow-Origin": "*",
+        // No `Access-Control-Allow-Origin: *` here: the stream is token-authed
+        // and consumed first-party (same origin as /v/). Leaving it open would
+        // let any web origin read a leaked-token stream cross-origin.
         "X-Accel-Buffering": "no",
       },
     });

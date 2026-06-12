@@ -53,27 +53,59 @@ public final class XPNetworkCapture: @unchecked Sendable {
         return out
     }
 
-    /// Field names whose values are credentials/secrets and must be masked when
-    /// they appear in request/response body previews (JSON values or form fields).
-    private static let sensitiveBodyKeys = [
-        "password", "passwd", "pwd", "secret", "token", "access_token",
-        "refresh_token", "id_token", "api_key", "apikey", "authorization",
-        "client_secret", "private_key", "session", "otp", "pin",
+    /// Substrings (matched against a normalised, alphanumeric-only key) that mark
+    /// a field as a credential/secret to mask in body previews, form fields, and
+    /// URL query parameters. "Contains" matching is deliberately broad — a debug
+    /// redactor should over-mask rather than leak (e.g. `userPassword`,
+    /// `X-Auth-Token`, `refresh_token` all match).
+    private static let sensitiveKeyNeedles = [
+        "password", "passwd", "pwd", "passphrase",
+        "secret", "token", "apikey", "authorization",
+        "credential", "privatekey", "clientsecret",
+        "otp", "pin", "cvv", "ssn",
+        "sessionid", "sessiontoken", "accesstoken", "refreshtoken", "idtoken",
+        "authtoken", "csrf", "xsrf",
     ]
 
-    private static let bodyRedactionRules: [(regex: NSRegularExpression, template: String)] = {
-        var rules: [(NSRegularExpression, String)] = []
-        for key in sensitiveBodyKeys {
-            let escaped = NSRegularExpression.escapedPattern(for: key)
-            // JSON string value:  "key" : "value"  ->  keep the quotes, mask value
-            if let r = try? NSRegularExpression(
-                pattern: "(\"\(escaped)\"\\s*:\\s*\")[^\"]*(\")",
-                options: [.caseInsensitive]) {
-                rules.append((r, "$1<redacted>$2"))
+    /// True if `key` names a credential/secret. Normalises by lowercasing and
+    /// stripping non-alphanumerics so `access_token`, `accessToken`, and
+    /// `Access-Token` all collapse to the same needle.
+    static func isSensitiveFieldName(_ key: String) -> Bool {
+        let norm = key.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }
+        let normalized = String(String.UnicodeScalarView(norm))
+        return sensitiveKeyNeedles.contains { normalized.contains($0) }
+    }
+
+    /// Recursively masks the values of sensitive keys in a parsed JSON object,
+    /// regardless of value type (string, number, bool, object, array) — closing
+    /// the gap where a regex only caught quoted string values.
+    private static func redactJSONValue(_ value: Any) -> Any {
+        if let dict = value as? [String: Any] {
+            var out: [String: Any] = [:]
+            for (k, v) in dict {
+                out[k] = isSensitiveFieldName(k) ? "<redacted>" : redactJSONValue(v)
             }
-            // Form / query field:  key=value  ->  keep the key, mask value
+            return out
+        }
+        if let arr = value as? [Any] {
+            return arr.map { redactJSONValue($0) }
+        }
+        return value
+    }
+
+    private static let formFieldRedactionRules: [(regex: NSRegularExpression, template: String)] = {
+        var rules: [(NSRegularExpression, String)] = []
+        // Fallback for non-JSON / truncated bodies: mask form & query style
+        // `key=value`, plus JSON string AND scalar values (number/bool/null).
+        for key in sensitiveKeyNeedles {
+            let escaped = NSRegularExpression.escapedPattern(for: key)
             if let r = try? NSRegularExpression(
-                pattern: "(\\b\(escaped)=)[^&\\s\"]*",
+                pattern: "(\"[^\"]*\(escaped)[^\"]*\"\\s*:\\s*)(\"[^\"]*\"|-?\\d+(?:\\.\\d+)?|true|false|null)",
+                options: [.caseInsensitive]) {
+                rules.append((r, "$1\"<redacted>\""))
+            }
+            if let r = try? NSRegularExpression(
+                pattern: "([?&;]?\\b[\\w-]*\(escaped)[\\w-]*=)[^&\\s\"]*",
                 options: [.caseInsensitive]) {
                 rules.append((r, "$1<redacted>"))
             }
@@ -83,15 +115,40 @@ public final class XPNetworkCapture: @unchecked Sendable {
 
     /// Masks the values of sensitive fields inside a captured body preview so
     /// passwords/tokens/secrets in JSON or form payloads aren't exposed to an
-    /// inspector on the LAN.
+    /// inspector (LAN or cloud). Prefers a structural JSON walk (covers nested /
+    /// non-string values); falls back to regex for non-JSON or truncated bodies.
     static func redactBody(_ body: String?) -> String? {
-        guard var out = body, !out.isEmpty else { return body }
-        for rule in bodyRedactionRules {
+        guard let body, !body.isEmpty else { return body }
+        if let data = body.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+           let redactedData = try? JSONSerialization.data(
+               withJSONObject: redactJSONValue(parsed),
+               options: [.fragmentsAllowed, .sortedKeys]),
+           let out = String(data: redactedData, encoding: .utf8) {
+            return out
+        }
+        var out = body
+        for rule in formFieldRedactionRules {
             let range = NSRange(out.startIndex..<out.endIndex, in: out)
             out = rule.regex.stringByReplacingMatches(
                 in: out, options: [], range: range, withTemplate: rule.template)
         }
         return out
+    }
+
+    /// Masks sensitive query-parameter values in a URL (e.g. signed-URL tokens,
+    /// `?access_token=…`) so they don't leak to an inspector. Leaves the path and
+    /// non-sensitive params intact. Returns the input unchanged if it can't be
+    /// parsed as a URL with a query.
+    static func redactURL(_ urlString: String) -> String {
+        guard var components = URLComponents(string: urlString),
+              let items = components.queryItems, !items.isEmpty else { return urlString }
+        components.queryItems = items.map { item in
+            isSensitiveFieldName(item.name)
+                ? URLQueryItem(name: item.name, value: "<redacted>")
+                : item
+        }
+        return components.string ?? urlString
     }
 
     /// Returns a copy of `entry` with credentials/secrets masked. Applied on
@@ -101,7 +158,7 @@ public final class XPNetworkCapture: @unchecked Sendable {
     public static func redactedEntry(_ entry: XPNetworkEntry) -> XPNetworkEntry {
         XPNetworkEntry(
             id: entry.id,
-            url: entry.url,
+            url: redactURL(entry.url),
             method: entry.method,
             statusCode: entry.statusCode,
             requestHeaders: redactHeaders(entry.requestHeaders),
