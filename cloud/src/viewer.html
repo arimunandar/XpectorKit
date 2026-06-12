@@ -509,7 +509,7 @@
 </head>
 <body>
 <script>
-(function(){try{var q=new URLSearchParams((location.hash||'').replace(/^#/,''));var t=q.get('t')||'';var p=location.pathname.split('/').filter(Boolean);var sid=p[1]||'';if(sid&&t){var sec=location.protocol==='https:'?';Secure':'';document.cookie='xp='+encodeURIComponent(sid+'.'+t)+';path=/;SameSite=Strict'+sec;}}catch(e){}})();
+(function(){try{var q=new URLSearchParams((location.hash||'').replace(/^#/,''));var t=q.get('t')||'';var p=location.pathname.split('/').filter(Boolean);var sid=p[1]||'';if(sid&&t){var sec=location.protocol==='https:'?';Secure':'';var maxAge='';try{var b64=t.split('.')[0].replace(/-/g,'+').replace(/_/g,'/');while(b64.length%4)b64+='=';var exp=JSON.parse(atob(b64)).exp;if(typeof exp==='number'){var secs=Math.floor((exp-Date.now())/1000);maxAge=';Max-Age='+(secs>0?secs:0);}}catch(e){}document.cookie='xp='+encodeURIComponent(sid+'.'+t)+';path=/;SameSite=Strict'+maxAge+sec;}}catch(e){}})();
 </script>
   <header>
     <div class="hrow-main">
