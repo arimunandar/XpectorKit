@@ -106,7 +106,7 @@
 
   /* network — postman-like split */
   #net { display: flex; height: 100%; }
-  .net-list { flex: 0 0 38%; max-width: 460px; overflow-y: auto; border-right: 1px solid #23272e; }
+  .net-list { flex: 0 0 38%; min-width: 200px; max-width: 70%; overflow-y: auto; border-right: 1px solid #23272e; }
   .net-item {
     display: flex; align-items: center; gap: 8px; padding: 8px 12px;
     border-bottom: 1px solid #1a1d23; cursor: pointer;
@@ -200,7 +200,7 @@
   .panel {
     margin: 0; padding: 12px 14px; background: transparent;
     white-space: pre-wrap; word-break: break-word; color: #b6bcc6; font-size: 12px; line-height: 1.5;
-    max-height: 46vh; overflow: auto;
+    max-height: 72vh; overflow: auto;
   }
   /* headers as a key/value table */
   .hdr-table { width: 100%; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
@@ -306,9 +306,10 @@
     flex: 0 0 256px; overflow: auto; border-right: 1px solid #23272e;
     background: #0f1217; padding: 6px 0; font-size: 12px;
   }
-  /* A draggable divider to resize the hierarchy panel. */
-  .layers-resizer { flex: 0 0 5px; cursor: col-resize; background: #23272e; }
-  .layers-resizer:hover, .layers-resizer.drag { background: #3a6fae; }
+  /* A draggable divider to resize the hierarchy panel / network list. */
+  .layers-resizer, .net-resizer { flex: 0 0 5px; cursor: col-resize; background: #23272e; }
+  .layers-resizer:hover, .layers-resizer.drag,
+  .net-resizer:hover, .net-resizer.drag { background: #3a6fae; }
   /* Rows size to their content (indent + name) and the panel scrolls
      horizontally, so deep nodes are readable instead of truncated. */
   .tree-row {
@@ -461,7 +462,8 @@
 
     /* Network becomes a master → detail slide-over instead of a cramped split */
     #net { position: relative; }
-    .net-list { flex: 1 1 100%; max-width: none; border-right: none; }
+    .net-list { flex: 1 1 100%; max-width: none; min-width: 0; border-right: none; }
+    .net-resizer { display: none; }
     .net-item { padding: 12px 12px; }        /* taller rows to tap */
     .net-detail {
       position: absolute; inset: 0; background: #0d0f12;
@@ -537,6 +539,7 @@
   <div class="view hidden" id="netView">
     <div id="net">
       <div class="net-list" id="netList"></div>
+      <div class="net-resizer" id="netResizer"></div>
       <div class="net-detail" id="netDetail"><div class="net-empty">Select a request to inspect it.</div></div>
     </div>
   </div>
@@ -1443,6 +1446,26 @@
   function endRz() { rzDown = null; layersResizerEl.classList.remove('drag'); }
   layersResizerEl.addEventListener('pointerup', endRz);
   layersResizerEl.addEventListener('pointercancel', endRz);
+
+  // Resize the network request list by dragging the divider.
+  const netResizerEl = document.getElementById('netResizer');
+  let netRzDown = null;
+  netResizerEl.addEventListener('pointerdown', (e) => {
+    netRzDown = { x: e.clientX, w: netListEl.offsetWidth };
+    netResizerEl.classList.add('drag');
+    netResizerEl.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  netResizerEl.addEventListener('pointermove', (e) => {
+    if (!netRzDown) return;
+    const max = Math.max(260, document.getElementById('net').offsetWidth - 360);
+    const w = Math.max(200, Math.min(max, netRzDown.w + (e.clientX - netRzDown.x)));
+    netListEl.style.flex = '0 0 ' + w + 'px';
+    netListEl.style.maxWidth = 'none';
+  });
+  function endNetRz() { netRzDown = null; netResizerEl.classList.remove('drag'); }
+  netResizerEl.addEventListener('pointerup', endNetRz);
+  netResizerEl.addEventListener('pointercancel', endNetRz);
 
   // ---- sockets (websocket connections + message timeline) ----
   const wsListEl = document.getElementById('wsList');
