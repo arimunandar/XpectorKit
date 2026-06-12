@@ -32,8 +32,9 @@ public final class XpectorServer: @unchecked Sendable {
     private var bonjourPublisher: XPBonjourPublisher?
     private var wifiServer: XPWiFiServer?
     private var httpLogServer: XPHttpLogServer?
-    /// Outbound cloud-relay client (DEBUG-only; created only when
-    /// `enableCloudRelay` is set with a base URL + ingest key). nil in Release.
+    /// Outbound cloud-relay client (created only in DEBUG or XPECTOR_ENABLED
+    /// builds, when `enableCloudRelay` is set with a base URL + ingest key).
+    /// nil in Release.
     private var cloudRelay: XPCloudRelayClient?
     #if DEBUG
     private var keychainCapture: XPKeychainCapture?
@@ -297,10 +298,11 @@ public final class XpectorServer: @unchecked Sendable {
 
         // Cloud relay — stream the same events AND proxy the same pull endpoints
         // out to relay.xpector.cloud, so a browser off the LAN gets the full
-        // viewer (Current + Layers included). Opt-in and DEBUG-only: the ingest
-        // key authenticates the producer leg and must never ship in a Release
-        // build, so creation is compiled out entirely.
-        #if DEBUG
+        // viewer (Current + Layers included). Opt-in: the ingest key authenticates
+        // the producer leg and must never ship in a Release/App Store build, so
+        // creation is compiled out unless the build defines DEBUG or the host's
+        // XPECTOR_ENABLED flag (intended for dev/staging/QA configs, never Release).
+        #if DEBUG || XPECTOR_ENABLED
         if config.enableCloudRelay,
            let baseString = config.cloudRelayBaseURL,
            let baseURL = URL(string: baseString),
