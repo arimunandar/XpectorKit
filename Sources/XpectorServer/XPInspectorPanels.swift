@@ -98,27 +98,37 @@ struct XPPanelScaffold<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
-        NavigationView {
-            ZStack {
-                XPTheme.bg.ignoresSafeArea()
-                VStack(spacing: 0) { content }
-            }
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    if let onClear {
-                        Button("Clear", action: onClear).foregroundColor(XPTheme.txt2)
-                    }
+        // NavigationStack on iOS 16+ lays out correctly inside a TabView; the
+        // deprecated NavigationView double-counts the tab-bar safe-area inset,
+        // leaving a dead gap between the scroll content and the tab bar. Fall
+        // back to NavigationView (.stack) on iOS 15.
+        if #available(iOS 16.0, *) {
+            NavigationStack { scaffoldBody }
+        } else {
+            NavigationView { scaffoldBody }
+                .navigationViewStyle(.stack)
+        }
+    }
+
+    private var scaffoldBody: some View {
+        ZStack {
+            XPTheme.bg.ignoresSafeArea()
+            VStack(spacing: 0) { content }
+        }
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                if let onClear {
+                    Button("Clear", action: onClear).foregroundColor(XPTheme.txt2)
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: onClose) {
-                        Text("Done").font(.system(size: 16, weight: .semibold)).foregroundColor(XPTheme.accent)
-                    }
+            }
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button(action: onClose) {
+                    Text("Done").font(.system(size: 16, weight: .semibold)).foregroundColor(XPTheme.accent)
                 }
             }
         }
-        .navigationViewStyle(.stack)
     }
 }
 
