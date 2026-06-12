@@ -10,7 +10,7 @@ relay over a WebSocket. One Durable Object per session fans out streamed events
 when the session ends the DO evaporates.
 
 ```
- App  ──WSS  /ingest/<sid>  (Authorization: Bearer INGEST_KEY)──►  Worker ──► DO (session)
+ App  ──WSS  /ingest/<sid>  (Authorization: Bearer <ingest key>)──►  Worker ──► DO (session)
  Browser  ──GET /v/<sid>#t=<token>   (serves the real LAN viewer HTML; sets session cookie)
           ──SSE /stream                       (streamed events: log/net/leak/nav)
           ──GET /screen|/hierarchy|/node/*    (proxied to the device over the WS)
@@ -33,9 +33,9 @@ LAN. 8s timeout; returns 503 if the device is offline.
 
 | File | Purpose |
 |------|---------|
-| `src/index.ts` | Worker router + `XPSessionRelay` Durable Object |
-| `src/viewer.ts` | Self-contained browser viewer (HTML/JS) |
-| `wrangler.jsonc` | Config, DO binding, custom-domain route |
+| `src/index.ts` | Worker router + `XPSessionRelay` (session) & `XPKeyRegistry` (tenant keys) Durable Objects |
+| `src/viewer.html` | Self-contained browser viewer (HTML/JS) |
+| `wrangler.jsonc` | Config, DO bindings, custom-domain route |
 | `smoke.mjs` | End-to-end test against `wrangler dev` |
 
 ## Develop
@@ -51,12 +51,15 @@ npm run typecheck
 
 ## Deploy
 
-1. Set the two secrets (never commit them):
+1. Set the secrets (never commit them):
    ```bash
-   wrangler secret put INGEST_KEY      # dev API key baked into DEBUG app builds ONLY
-   wrangler secret put TOKEN_SECRET    # HMAC key for signing viewer tokens (random, long)
+   wrangler secret put TOKEN_SECRET    # REQUIRED — HMAC key for signing viewer tokens (random, long)
+   wrangler secret put INGEST_KEY      # OPTIONAL — root/operator key; or rely on self-issued keys
+   wrangler secret put ADMIN_KEY       # OPTIONAL — set to CLOSE self-service key issuance
    ```
-   Generate strong values, e.g. `openssl rand -hex 32`.
+   Generate strong values, e.g. `openssl rand -hex 32`. With no `ADMIN_KEY`,
+   anyone can self-mint a tenant key via `POST /api/keys` (rate-limited per IP);
+   set `ADMIN_KEY` to require it for issuance.
 
 2. Pick the hostname. `wrangler.jsonc` defaults to `relay.xpector.cloud` as a Cloudflare
    **custom domain** (Wrangler creates the DNS record automatically on first deploy, since
@@ -69,10 +72,38 @@ npm run typecheck
    wrangler tail        # live logs
    ```
 
+## Keys & multi-tenancy
+
+The relay is **multi-tenant**: every ingest key is its own tenant, and sessions
+minted with a key are isolated from other tenants' (a key can only ingest into /
+revoke the sessions it created). There are two ways to get a key:
+
+- **Self-issued** (`POST /api/keys`) — anyone can mint their own key. Open by
+  default and **rate-limited per IP** (10 / hour). Set the `ADMIN_KEY` secret to
+  close issuance (then `POST /api/keys` requires `Authorization: Bearer <ADMIN_KEY>`).
+- **Operator/root** — the optional `INGEST_KEY` secret maps to a reserved `root`
+  tenant, for the relay owner's own use and backward compatibility.
+
+A key is just a high-entropy string; only its SHA-256 hash is stored, so a
+registry dump never leaks usable keys.
+
 ## HTTP API
 
+### `POST /api/keys`  — mint a tenant key
+Open by default (IP-rate-limited); requires `Authorization: Bearer <ADMIN_KEY>` when
+`ADMIN_KEY` is set. Optional JSON body `{ "label": "alice's app" }`.
+```json
+{ "ingestKey": "xpk_…", "tenantId": "t_…", "createdAt": 1781234569539 }
+```
+The `ingestKey` is returned **once** — store it (it's your `cloudRelayIngestKey`).
+Returns **429** when the per-IP budget is exhausted, **401** if `ADMIN_KEY` is required and wrong.
+
+### `POST /api/keys/revoke`  — revoke a tenant key
+A key may revoke **itself** (`Authorization: Bearer <key>`). With `ADMIN_KEY` you may
+revoke any key via body `{ "ingestKey": "<key>" }`. Returns `{ "revoked": true|false }`.
+
 ### `POST /api/session`  — app mints a session
-Auth: `Authorization: Bearer <INGEST_KEY>`. Optional JSON body `{ "name": "iPhone 15 · QA" }`.
+Auth: `Authorization: Bearer <ingest key>` (a self-issued `xpk_…` key or the root `INGEST_KEY`). Optional JSON body `{ "name": "iPhone 15 · QA" }`.
 
 Response:
 ```json
@@ -90,14 +121,15 @@ for the SSE request. Token is HMAC-signed, bound to the session, and expires
 (`VIEWER_TTL_SECONDS`, default 30 min).
 
 ### `POST /api/revoke`  — app kills a session
-Auth: `Authorization: Bearer <INGEST_KEY>`. Body `{ "sessionId": "<sid>" }`. Marks the
-session revoked (persisted in the DO): current viewers are dropped and all later
-`/stream` / `/screen` / `/hierarchy` / `/node/*` requests return **410**. Used by the
+Auth: `Authorization: Bearer <ingest key>` (must be the key that **created** the
+session, else **403**). Body `{ "sessionId": "<sid>" }`. Marks the session revoked
+(persisted in the DO): current viewers are dropped and all later `/stream` /
+`/screen` / `/hierarchy` / `/node/*` requests return **410**. Used by the
 "Regenerate" button — the app mints a fresh session and revokes the old one, so the
 previous share link stops working immediately.
 
 ### `WSS /ingest/<sid>`  — app pushes events
-Auth: `Authorization: Bearer <INGEST_KEY>`. Each WS text message is one JSON frame:
+Auth: `Authorization: Bearer <ingest key>` (must own the session, else **403**). Each WS text message is one JSON frame:
 ```json
 { "t": "log" | "net" | "leak" | "nav", "d": <same payload as the LAN SSE data line> }
 ```
@@ -143,8 +175,13 @@ Network entries get extra header redaction (`Authorization`/`Cookie`/`Set-Cookie
 
 ## Security model
 
-- **DEBUG-only**, like `XPHttpLogServer`. `INGEST_KEY` never ships in Release.
+- **DEBUG-only**, like `XPHttpLogServer`. Ingest keys never ship in Release.
 - Session IDs are random 128-bit (not enumerable).
 - Viewer access requires a short-lived **HMAC-signed token** bound to the session;
   links auto-expire. No accounts, no persistence.
+- **Tenant isolation:** each ingest key is its own tenant; a key can only ingest
+  into / revoke sessions it created (else 403). Only the SHA-256 hash of a key is
+  stored. Constant-time key comparison.
+- Self-service issuance is **rate-limited per IP** (open mode); set `ADMIN_KEY` to
+  close it entirely.
 - This is live-debug tooling, **not** a production logging backend.

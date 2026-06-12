@@ -144,6 +144,45 @@ tab. No off-LAN link is minted automatically — tap **Generate** on that tab to
 provision a private `relay.xpector.cloud` link on demand (and **Regenerate** to
 mint a fresh one and revoke the old).
 
+### Cloud relay — get a key & self-host
+
+The cloud relay lets a browser on **any** network watch a device live (the app
+dials out over HTTPS). It needs a relay and an **ingest key** (DEBUG-only — never
+ship it in Release). The relay is multi-tenant: every key is its own isolated
+tenant.
+
+**1. Get a key.** Mint one against a relay (self-service, no account):
+
+```bash
+curl -X POST https://relay.xpector.cloud/api/keys -d '{"label":"my app"}'
+# → { "ingestKey": "xpk_…", "tenantId": "t_…" }
+```
+
+**2. Configure the app** (DEBUG only — load the key from an xcconfig / env, don't commit it):
+
+```swift
+#if DEBUG
+var config = XPConfiguration()
+config.enableCloudRelay = true
+config.cloudRelayBaseURL = "https://relay.xpector.cloud"
+config.cloudRelayIngestKey = myDebugIngestKey   // the xpk_… from step 1
+XpectorServer.shared.start(config: config)
+#endif
+```
+
+**Self-host your own relay** (recommended for teams — full isolation, your own
+quota): the entire relay is in [`cloud/`](cloud/). Deploy it to your own Cloudflare
+account and either self-mint keys or set `ADMIN_KEY` to control issuance:
+
+```bash
+cd cloud && npm install
+wrangler secret put TOKEN_SECRET     # required (openssl rand -hex 32)
+wrangler deploy                      # → https://xpector-relay.<you>.workers.dev
+```
+
+Point `cloudRelayBaseURL` at your deployment. See [`cloud/README.md`](cloud/README.md)
+for the full key/tenant API (`POST /api/keys`, rate limits, `ADMIN_KEY`, revocation).
+
 ### Ports & opt-out
 
 - **Port** is derived automatically: `inspection port + 101` (e.g. `47265`).

@@ -22,10 +22,15 @@ import VIEWER_HTML from "./viewer.html";
 
 export interface Env {
   RELAY: DurableObjectNamespace<XPSessionRelay>;
+  KEYS: DurableObjectNamespace<XPKeyRegistry>;
   INGEST_KEY: string;
   TOKEN_SECRET: string;
   PUBLIC_BASE: string;
   VIEWER_TTL_SECONDS: string;
+  // Optional. When set, POST /api/keys requires `Authorization: Bearer <ADMIN_KEY>`
+  // (operator-issued keys). When unset, key issuance is open + IP-rate-limited
+  // so anyone self-hosting can let users mint their own keys.
+  ADMIN_KEY?: string;
 }
 
 // ----- event protocol (app → DO → browser) ----------------------------------
@@ -102,23 +107,43 @@ function randomId(): string {
   crypto.getRandomValues(bytes);
   return b64urlEncode(bytes);
 }
-async function checkIngestKey(request: Request, env: Env): Promise<boolean> {
+function bearerKey(request: Request): string {
   const auth = request.headers.get("Authorization") ?? "";
   const m = auth.match(/^Bearer\s+(.+)$/i);
-  const provided = m ? m[1] : request.headers.get("X-Xpector-Key") ?? "";
-  if (!provided || !env.INGEST_KEY) return false;
-  // Compare fixed-length SHA-256 digests so neither the length nor the content
-  // of INGEST_KEY leaks via timing (the previous length short-circuit did).
+  return m ? m[1] : request.headers.get("X-Xpector-Key") ?? "";
+}
+
+async function sha256Hex(s: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return b64urlEncode(digest);
+}
+
+/** Constant-time string compare over fixed-length SHA-256 digests, so neither
+ *  length nor content leaks via timing. */
+async function secretEquals(a: string, b: string): Promise<boolean> {
+  if (!a || !b) return false;
   const enc = new TextEncoder();
-  const [a, b] = await Promise.all([
-    crypto.subtle.digest("SHA-256", enc.encode(provided)),
-    crypto.subtle.digest("SHA-256", enc.encode(env.INGEST_KEY)),
+  const [da, db] = await Promise.all([
+    crypto.subtle.digest("SHA-256", enc.encode(a)),
+    crypto.subtle.digest("SHA-256", enc.encode(b)),
   ]);
-  const av = new Uint8Array(a);
-  const bv = new Uint8Array(b);
+  const av = new Uint8Array(da);
+  const bv = new Uint8Array(db);
   let diff = 0;
   for (let i = 0; i < av.length; i++) diff |= av[i] ^ bv[i];
   return diff === 0;
+}
+
+/** Resolve the producer's tenant from its Bearer key, or null if unauthorized.
+ *  The operator's `INGEST_KEY` secret (if set) maps to the reserved "root"
+ *  tenant for backward compatibility; every other valid key is a registered
+ *  tenant minted via POST /api/keys. */
+async function resolveTenant(request: Request, env: Env): Promise<string | null> {
+  const provided = bearerKey(request);
+  if (!provided) return null;
+  if (env.INGEST_KEY && (await secretEquals(provided, env.INGEST_KEY))) return "root";
+  const tid = await env.KEYS.getByName("_root").lookupTenant(await sha256Hex(provided));
+  return tid;
 }
 
 // Resolve + verify the viewer session from the `xp=<sid>.<token>` cookie that
@@ -162,22 +187,65 @@ export default {
       return new Response("xpector-relay ok", { headers: cors({ "Content-Type": "text/plain" }) });
     }
 
+    // Self-service key issuance. Each key is its own tenant; sessions minted
+    // with it are isolated from other tenants'. Open + IP-rate-limited unless
+    // ADMIN_KEY is configured, in which case it must be presented.
+    if (path === "/api/keys" && request.method === "POST") {
+      if (env.ADMIN_KEY) {
+        if (!(await secretEquals(bearerKey(request), env.ADMIN_KEY))) {
+          return new Response("unauthorized", { status: 401, headers: cors() });
+        }
+      }
+      let label = "";
+      try {
+        const b = (await request.json()) as { label?: string };
+        if (b && typeof b.label === "string") label = b.label.slice(0, 80);
+      } catch {
+        /* body optional */
+      }
+      const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+      const open = !env.ADMIN_KEY;
+      const res = await env.KEYS.getByName("_root").issue(label, ip, open);
+      if (!res) return new Response("rate limited", { status: 429, headers: cors() });
+      // The raw key is returned exactly ONCE — only its hash is stored.
+      return Response.json(res, { headers: cors() });
+    }
+
+    // Revoke a key (a key may revoke itself; ADMIN_KEY may revoke any).
+    if (path === "/api/keys/revoke" && request.method === "POST") {
+      const provided = bearerKey(request);
+      const isAdmin = env.ADMIN_KEY ? await secretEquals(provided, env.ADMIN_KEY) : false;
+      let target = provided;
+      try {
+        const b = (await request.json()) as { ingestKey?: string };
+        if (isAdmin && b && typeof b.ingestKey === "string") target = b.ingestKey;
+      } catch {
+        /* body optional */
+      }
+      if (!target) return new Response("missing key", { status: 400, headers: cors() });
+      const ok = await env.KEYS.getByName("_root").revokeKey(await sha256Hex(target));
+      return Response.json({ revoked: ok }, { headers: cors() });
+    }
+
     // App mints a session.
     if (path === "/api/session" && request.method === "POST") {
-      if (!(await checkIngestKey(request, env))) return new Response("unauthorized", { status: 401, headers: cors() });
+      const tid = await resolveTenant(request, env);
+      if (!tid) return new Response("unauthorized", { status: 401, headers: cors() });
       const sid = randomId();
       const ttl = parseInt(env.VIEWER_TTL_SECONDS || "1800", 10);
       const { token, expMs } = await mintViewerToken(env.TOKEN_SECRET, sid, ttl, now);
       const base = env.PUBLIC_BASE.replace(/\/+$/, "");
       const wsBase = base.replace(/^http/, "ws");
-      let name: string | undefined;
+      let name = "";
       try {
         const body = (await request.json()) as { name?: string };
         if (body && typeof body.name === "string") name = body.name.slice(0, 80);
       } catch {
         /* body optional */
       }
-      if (name) await env.RELAY.getByName(sid).setName(name);
+      // Bind the session to its creating tenant (and store the name) so only
+      // that tenant can ingest into / revoke it.
+      await env.RELAY.getByName(sid).init(tid, name);
       return Response.json(
         {
           sessionId: sid,
@@ -192,7 +260,8 @@ export default {
 
     // App kills a session (on regenerate) — old viewer links stop working.
     if (path === "/api/revoke" && request.method === "POST") {
-      if (!(await checkIngestKey(request, env))) return new Response("unauthorized", { status: 401, headers: cors() });
+      const tid = await resolveTenant(request, env);
+      if (!tid) return new Response("unauthorized", { status: 401, headers: cors() });
       let sid = "";
       try {
         const b = (await request.json()) as { sessionId?: string };
@@ -201,7 +270,8 @@ export default {
         /* ignore */
       }
       if (!sid) return new Response("missing sessionId", { status: 400, headers: cors() });
-      await env.RELAY.getByName(sid).revoke();
+      const ok = await env.RELAY.getByName(sid).revoke(tid);
+      if (!ok) return new Response("forbidden", { status: 403, headers: cors() });
       return Response.json({ revoked: true }, { headers: cors() });
     }
 
@@ -210,10 +280,14 @@ export default {
       if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
         return new Response("expected websocket", { status: 426, headers: cors() });
       }
-      if (!(await checkIngestKey(request, env))) return new Response("unauthorized", { status: 401 });
+      const tid = await resolveTenant(request, env);
+      if (!tid) return new Response("unauthorized", { status: 401 });
       const sid = decodeURIComponent(path.slice("/ingest/".length));
       if (!sid) return new Response("missing session", { status: 400 });
-      return env.RELAY.getByName(sid).fetch(new Request("https://do/ingest", request));
+      // The DO rejects the upgrade if `tid` isn't the session's owner.
+      return env.RELAY.getByName(sid).fetch(
+        new Request(`https://do/ingest?tid=${encodeURIComponent(tid)}`, request)
+      );
     }
 
     // Viewer HTML — inject the live app name; the page sets the session cookie
@@ -297,6 +371,7 @@ export class XPSessionRelay extends DurableObject<Env> {
   private viewers = new Set<WritableStreamDefaultWriter>();
   private buffers: Record<EventType, BufferedEvent[]> = { log: [], net: [], leak: [], nav: [] };
   private sessionName = "";
+  private ownerTid: string | null = null;
   private revoked = false;
   private encoder = new TextEncoder();
   // Pending device round-trips: request id → resolver.
@@ -304,14 +379,22 @@ export class XPSessionRelay extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    // Revocation must survive eviction, or a killed link could revive.
+    // Owner + revocation must survive eviction, or a killed link could revive /
+    // a session could lose its tenant binding.
     ctx.blockConcurrencyWhile(async () => {
       this.revoked = (await ctx.storage.get<boolean>("revoked")) ?? false;
+      this.ownerTid = (await ctx.storage.get<string>("owner")) ?? null;
     });
   }
 
-  async setName(name: string): Promise<void> {
-    this.sessionName = name;
+  // Bind the session to the tenant that created it (first writer wins; a second
+  // init from a different tenant is ignored so a sid can't be hijacked).
+  async init(tid: string, name: string): Promise<void> {
+    if (this.ownerTid === null) {
+      this.ownerTid = tid;
+      await this.ctx.storage.put("owner", tid);
+    }
+    if (name) this.sessionName = name;
   }
   async getName(): Promise<string> {
     // Don't leak the app name for a killed session (the /v page falls back to a
@@ -320,8 +403,10 @@ export class XPSessionRelay extends DurableObject<Env> {
   }
 
   // Kill this session: drop viewers, close the producer, and reject everything
-  // afterwards so the old share link is dead.
-  async revoke(): Promise<void> {
+  // afterwards so the old share link is dead. Only the owning tenant may revoke
+  // (the worker passes its resolved tid); returns false if it doesn't own this.
+  async revoke(tid?: string): Promise<boolean> {
+    if (this.ownerTid !== null && tid !== undefined && tid !== this.ownerTid) return false;
     this.revoked = true;
     await this.ctx.storage.put("revoked", true);
     for (const w of Array.from(this.viewers)) this.dropViewer(w);
@@ -333,18 +418,25 @@ export class XPSessionRelay extends DurableObject<Env> {
       }
       this.producer = null;
     }
+    return true;
   }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === "/ingest") return this.handleIngest();
+    if (url.pathname === "/ingest") return this.handleIngest(url.searchParams.get("tid"));
     if (url.pathname === "/sse") return this.handleViewer();
     if (url.pathname === "/dev") return this.proxyDevice(url.searchParams.get("path") || "");
     return new Response("not found", { status: 404 });
   }
 
   // --- producer (app) WebSocket ---
-  private handleIngest(): Response {
+  private handleIngest(tid: string | null): Response {
+    // Tenant isolation: a producer may only ingest into a session its own key
+    // created. (sids are unguessable, so this is defense-in-depth.)
+    if (this.revoked) return new Response("session ended", { status: 410 });
+    if (this.ownerTid !== null && tid !== this.ownerTid) {
+      return new Response("forbidden", { status: 403 });
+    }
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
@@ -490,5 +582,67 @@ export class XPSessionRelay extends DurableObject<Env> {
     if (this.producer !== null || this.viewers.size > 0) {
       await this.ctx.storage.setAlarm(Date.now() + 15_000);
     }
+  }
+}
+
+// ----- Durable Object: tenant key registry (single global instance) ----------
+//
+// Maps a SHA-256 hash of each issued ingest key → its tenant id. Only the hash
+// is stored, so a registry dump never leaks usable keys. A single instance
+// (addressed by the fixed name "_root") serialises issuance and lookups.
+
+interface KeyRecord {
+  tid: string;
+  label: string;
+  createdAt: number;
+}
+interface RateRecord {
+  count: number;
+  resetAt: number;
+}
+
+export class XPKeyRegistry extends DurableObject<Env> {
+  // Open (no ADMIN_KEY) issuance budget per IP, to bound abuse.
+  private static readonly RL_MAX = 10;
+  private static readonly RL_WINDOW_MS = 60 * 60 * 1000;
+
+  private gen(prefix: string, bytes: number): string {
+    const b = new Uint8Array(bytes);
+    crypto.getRandomValues(b);
+    return prefix + b64urlEncode(b);
+  }
+
+  /** Mint a new key + tenant. In open mode, enforce a per-IP rate limit.
+   *  Returns null when rate-limited. The raw key is returned ONCE. */
+  async issue(label: string, ip: string, open: boolean): Promise<{ ingestKey: string; tenantId: string; createdAt: number } | null> {
+    const now = Date.now();
+    if (open) {
+      const rlKey = `rl:${ip}`;
+      const rl = (await this.ctx.storage.get<RateRecord>(rlKey)) ?? { count: 0, resetAt: now + XPKeyRegistry.RL_WINDOW_MS };
+      if (now > rl.resetAt) {
+        rl.count = 0;
+        rl.resetAt = now + XPKeyRegistry.RL_WINDOW_MS;
+      }
+      if (rl.count >= XPKeyRegistry.RL_MAX) return null;
+      rl.count += 1;
+      await this.ctx.storage.put(rlKey, rl);
+    }
+    const ingestKey = this.gen("xpk_", 24);
+    const tenantId = this.gen("t_", 12);
+    const hash = b64urlEncode(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(ingestKey)));
+    const rec: KeyRecord = { tid: tenantId, label, createdAt: now };
+    await this.ctx.storage.put(`k:${hash}`, rec);
+    return { ingestKey, tenantId, createdAt: now };
+  }
+
+  /** Resolve a key hash → tenant id (or null if unknown/revoked). */
+  async lookupTenant(keyHash: string): Promise<string | null> {
+    const rec = await this.ctx.storage.get<KeyRecord>(`k:${keyHash}`);
+    return rec ? rec.tid : null;
+  }
+
+  /** Revoke a key by hash. Returns whether it existed. */
+  async revokeKey(keyHash: string): Promise<boolean> {
+    return this.ctx.storage.delete(`k:${keyHash}`);
   }
 }

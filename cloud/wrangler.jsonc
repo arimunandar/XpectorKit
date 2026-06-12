@@ -24,11 +24,13 @@
 
   "durable_objects": {
     "bindings": [
-      { "name": "RELAY", "class_name": "XPSessionRelay" }
+      { "name": "RELAY", "class_name": "XPSessionRelay" },
+      { "name": "KEYS", "class_name": "XPKeyRegistry" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["XPSessionRelay"] }
+    { "tag": "v1", "new_sqlite_classes": ["XPSessionRelay"] },
+    { "tag": "v2", "new_sqlite_classes": ["XPKeyRegistry"] }
   ],
 
   "vars": {
@@ -39,6 +41,10 @@
   }
 
   // Secrets (set via `wrangler secret put`, NOT committed):
-  //   INGEST_KEY    - dev API key baked into DEBUG app builds only
+  //   INGEST_KEY    - operator/root key (maps to tenant "root"); optional once
+  //                   keys are self-issued via POST /api/keys
   //   TOKEN_SECRET  - HMAC key used to sign/verify short-lived viewer tokens
+  //   ADMIN_KEY     - OPTIONAL. If set, POST /api/keys requires it (closed,
+  //                   operator-issued). If unset, key issuance is open +
+  //                   per-IP rate-limited so users can self-mint keys.
 }
