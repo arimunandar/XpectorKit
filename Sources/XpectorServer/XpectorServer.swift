@@ -299,10 +299,12 @@ public final class XpectorServer: @unchecked Sendable {
 
         // Cloud relay — stream the same events AND proxy the same pull endpoints
         // out to relay.xpector.cloud, so a browser off the LAN gets the full
-        // viewer (Current + Layers included). Opt-in and DEBUG-only: the ingest
-        // key authenticates the producer leg and must never ship in a Release
-        // build, so creation is compiled out entirely.
-        #if DEBUG
+        // viewer (Current + Layers included). Gated at RUNTIME by
+        // `config.enableCloudRelay` (default false), NOT `#if DEBUG`, so it works
+        // in release-class dev configs (Staging/Canary) where SPM doesn't pass the
+        // host's DEBUG/XPECTOR_ENABLED flags to this package. The ingest key
+        // authenticates the producer leg, so hosts MUST only set enableCloudRelay
+        // (and call startForDevelopment) in non-production configs, never App Store.
         if config.enableCloudRelay,
            let baseString = config.cloudRelayBaseURL,
            let baseURL = URL(string: baseString),
@@ -323,7 +325,6 @@ public final class XpectorServer: @unchecked Sendable {
             cloudRelay = relay
             print("[Xpector] Cloud relay enabled (\(baseString)) — open the connect sheet (presentLogViewer) and tap Generate to mint a share link.")
         }
-        #endif
 
         foregroundObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.willEnterForegroundNotification,

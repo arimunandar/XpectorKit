@@ -468,8 +468,33 @@ public extension XpectorServer {
             if top is UIHostingController<XPInspectorRoot> { return }
 
             let dismisser = XPInspectorDismisser()
+
+            // The inspector's TabView tab bar inherits the host app's global
+            // UITabBar appearance. An opaque / non-translucent host proxy makes
+            // SwiftUI inset the scroll content above the bar, leaving a dead gap
+            // at the bottom. Pin a translucent appearance for the inspector (so
+            // content scrolls under the bar as designed) and restore the host's
+            // on dismiss. Set before the hosting controller's tab bar is created.
+            let tabProxy = UITabBar.appearance()
+            let savedStandard = tabProxy.standardAppearance
+            let savedScrollEdge = tabProxy.scrollEdgeAppearance
+            let savedTranslucent = tabProxy.isTranslucent
+            let translucentAppearance = UITabBarAppearance()
+            translucentAppearance.configureWithDefaultBackground()
+            tabProxy.standardAppearance = translucentAppearance
+            tabProxy.scrollEdgeAppearance = translucentAppearance
+            tabProxy.isTranslucent = true
+            let restoreTabBarAppearance = {
+                tabProxy.standardAppearance = savedStandard
+                tabProxy.scrollEdgeAppearance = savedScrollEdge
+                tabProxy.isTranslucent = savedTranslucent
+            }
+
             let host = UIHostingController(
-                rootView: XPInspectorRoot(initialTab: initialTab, onClose: { dismisser.dismiss() })
+                rootView: XPInspectorRoot(initialTab: initialTab, onClose: {
+                    restoreTabBarAppearance()
+                    dismisser.dismiss()
+                })
             )
             dismisser.host = host
             host.modalPresentationStyle = .fullScreen

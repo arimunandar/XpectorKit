@@ -1682,7 +1682,7 @@ final class XPHttpLogServer: @unchecked Sendable {
               d.style.height = (ih * layFit) + 'px';
               d.style.opacity = n.hidden ? 0.12 : Math.max(0.3, n.alpha);
               if (n.img && n.img.indexOf('data:image/') === 0) {
-                d.style.backgroundImage = 'url("' + n.img.replace(/["\\]/g, '\\$&') + '")';
+                d.style.backgroundImage = 'url("' + n.img.replace(/["\\\\]/g, '\\$&') + '")';
                 d.style.backgroundSize = (n.w * layFit) + 'px ' + (n.h * layFit) + 'px';
                 d.style.backgroundPosition = (-(ix - n.x) * layFit) + 'px ' + (-(iy - n.y) * layFit) + 'px';
               }
