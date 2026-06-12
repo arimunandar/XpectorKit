@@ -189,6 +189,14 @@
   .subtab:hover { color: #b6bcc6; }
   .subtab.active { color: #fff; border-bottom-color: #7fb0ff; }
   .pane.hidden { display: none; }
+  .detail-tabs { display: flex; gap: 20px; padding: 0 2px; margin: 0 0 14px; border-bottom: 1px solid #1f242b; }
+  .detail-tab {
+    background: transparent; color: #8b929c; border: 0; border-bottom: 2px solid transparent;
+    padding: 9px 2px 8px; font: inherit; font-size: 13px; font-weight: 600; letter-spacing: .3px; cursor: pointer;
+  }
+  .detail-tab:hover { color: #b6bcc6; }
+  .detail-tab.active { color: #fff; border-bottom-color: #7fb0ff; }
+  .sec.hidden { display: none; }
   .panel {
     margin: 0; padding: 12px 14px; background: transparent;
     white-space: pre-wrap; word-break: break-word; color: #b6bcc6; font-size: 12px; line-height: 1.5;
@@ -604,7 +612,7 @@
   let navCount = 0;
   let screenTimer = null;     // polls /screen while the Current tab is open
   let selectedId = null;
-  let reqTab = 'headers', resTab = 'body';
+  let reqTab = 'headers', resTab = 'body', detailTab = 'request';
 
   // De-dupe by entry id so a reconnect that replays the recent buffer
   // (e.g. after a WiFi blip) doesn't double rows. FIFO-bounded: replay only
@@ -909,14 +917,14 @@
     if (net.error) stats.querySelector('.stat:last-child .value').textContent = net.error;
     wrap.appendChild(stats);
 
-    wrap.appendChild(buildSection('Request', 'req', [
+    const reqSec = buildSection('Request', 'req', [
       { name: 'Headers', node: headersTable(net.requestHeaders), copy: headersText(net.requestHeaders) },
       { name: 'Body', node: bodyNode(net.requestBodyPreview), copy: pretty(net.requestBodyPreview) }
-    ], reqTab));
-    wrap.appendChild(buildSection('Response', 'res', [
+    ], reqTab);
+    const resSec = buildSection('Response', 'res', [
       { name: 'Headers', node: headersTable(net.responseHeaders), copy: headersText(net.responseHeaders) },
       { name: 'Body', node: bodyNode(net.responseBodyPreview), copy: pretty(net.responseBodyPreview) }
-    ], resTab));
+    ], resTab);
 
     // cURL — reproduce the request from the terminal.
     const curlSec = document.createElement('div'); curlSec.className = 'sec';
@@ -927,7 +935,26 @@
     const cpre = document.createElement('pre'); cpre.className = 'panel'; cpre.textContent = buildCurl(net);
     ccopy.onclick = () => copyText(cpre.textContent, ccopy);
     curlSec.appendChild(ch); curlSec.appendChild(cpre);
-    wrap.appendChild(curlSec);
+
+    // Top-level tab bar switching Request / Response / cURL.
+    const dPanels = { request: reqSec, response: resSec, curl: curlSec };
+    const dBtns = {};
+    const dTabbar = document.createElement('div'); dTabbar.className = 'detail-tabs';
+    [['request', 'Request'], ['response', 'Response'], ['curl', 'cURL']].forEach(function(pair) {
+      const k = pair[0];
+      const b = document.createElement('button'); b.className = 'detail-tab'; b.textContent = pair[1];
+      if (k === detailTab) b.classList.add('active'); else dPanels[k].classList.add('hidden');
+      b.onclick = () => {
+        detailTab = k;
+        for (const kk in dPanels) {
+          dBtns[kk].classList.toggle('active', kk === k);
+          dPanels[kk].classList.toggle('hidden', kk !== k);
+        }
+      };
+      dBtns[k] = b; dTabbar.appendChild(b);
+    });
+    wrap.appendChild(dTabbar);
+    wrap.appendChild(reqSec); wrap.appendChild(resSec); wrap.appendChild(curlSec);
 
     netDetailEl.innerHTML = '';
     netDetailEl.appendChild(wrap);
