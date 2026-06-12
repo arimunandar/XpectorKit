@@ -385,10 +385,12 @@ public final class XpectorServer: @unchecked Sendable {
                 XPURLProtocolInterceptor.installSessionConfigSwizzle()
             }
 
-            // WebSocket capture is a separate event family (the Sockets tab). The
-            // swizzle touches a private Apple subclass, so it's DEBUG-only; the
-            // capture sink + fan-out are wired the same way as `net`.
-            #if DEBUG
+            // WebSocket capture is a separate event family (the Sockets tab).
+            // Runtime-gated by `config.enableWebSocketCapture` (NOT #if DEBUG) so it
+            // works in release-class dev configs (Staging/Canary) where SPM doesn't
+            // pass the host's DEBUG flag to this package. The interceptor swizzles
+            // via object_getClass + string selectors — no linked private symbols
+            // (see XPWebSocketInterceptor) — and only runs on host opt-in.
             if config.enableWebSocketCapture {
                 let ws = XPWebSocketCapture.shared
                 ws.onEvent = { [weak self] event in
@@ -409,7 +411,6 @@ public final class XpectorServer: @unchecked Sendable {
                 }
                 XPWebSocketInterceptor.install()
             }
-            #endif
         }
 
         if config.enableNavigationCapture {
@@ -554,10 +555,8 @@ public final class XpectorServer: @unchecked Sendable {
         snapshot.network?.stop()
         snapshot.network?.onEntry = nil
 
-        // WebSocket capture: make the swizzle inert and stop the sink (DEBUG-only).
-        #if DEBUG
+        // WebSocket capture: make the swizzle inert and stop the sink.
         XPWebSocketInterceptor.uninstall()
-        #endif
         XPWebSocketCapture.shared.stop()
         XPWebSocketCapture.shared.onEvent = nil
 

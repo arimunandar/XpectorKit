@@ -456,12 +456,12 @@ public extension XpectorServer {
             XPURLProtocolInterceptor.installSessionConfigSwizzle()
 
             // Same for the Sockets tab: ensure WS capture is buffering and the
-            // swizzle is installed (DEBUG-only) so the tab works even when opened
-            // standalone (shake-to-inspect) without the full server running.
+            // swizzle is installed so the tab works even when opened standalone
+            // (shake-to-inspect) without the full server running. Not #if DEBUG:
+            // the interceptor links no private symbols, so it's safe in dev/QA
+            // (Staging/Canary) builds too.
             XPWebSocketCapture.shared.ensureCapturing()
-            #if DEBUG
             XPWebSocketInterceptor.install()
-            #endif
 
             guard let top = XPInspectorPresenter.topViewController() else { return }
             // Don't stack a second inspector.

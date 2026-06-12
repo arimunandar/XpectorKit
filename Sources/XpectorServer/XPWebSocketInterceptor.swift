@@ -15,11 +15,14 @@ import XpectorKit
 //      continuation wrappers over these exact selectors, so both APIs are
 //      covered by swizzling the completion-handler forms.
 //
-// **This whole file is `#if DEBUG`** — it touches Apple's private
-// `__NSURLSessionWebSocketTask`, which must never ship in a Release build. The
-// SDK fails closed in Release regardless; this keeps the private-API surface out
-// of the binary entirely.
-#if DEBUG
+// Compiled in all configs (not `#if DEBUG`) so WebSocket capture works in
+// release-class dev configs (Staging/Canary) where SPM does not pass the host's
+// DEBUG flag to this package. This is safe: the swizzle resolves the private
+// concrete task class at runtime via `object_getClass(task)` and string
+// selectors — NO private symbol (`__NSURLSessionWebSocketTask`) is linked into
+// the binary. It is installed only on explicit host opt-in (start with
+// `enableWebSocketCapture`, which a production build never does), so it stays
+// inert in App Store builds.
 enum XPWebSocketInterceptor {
     // Stable, unique associated-object keys (a fresh heap address each).
     private static let cidKey = UnsafeRawPointer(UnsafeMutableRawPointer.allocate(byteCount: 1, alignment: 1))
@@ -254,7 +257,6 @@ enum XPWebSocketInterceptor {
         ))
     }
 }
-#endif
 
 // MARK: - Explicit fallback wrapper (always compiled)
 
