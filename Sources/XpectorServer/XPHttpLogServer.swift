@@ -1284,9 +1284,10 @@ final class XPHttpLogServer: @unchecked Sendable {
         item.dataset.host = hostOf(net.url);
         ensureHostOption(item.dataset.host);
         item.innerHTML =
-          '<span class="badge ' + methodClass(net.method) + '">' + net.method + '</span>' +
+          '<span class="badge ' + methodClass(net.method) + '"></span>' +
           '<span class="path"></span>' +
           '<span class="m2"><span class="' + codeCls + '">' + code + '</span> · ' + Math.round(net.durationMs) + 'ms</span>';
+        item.querySelector('.badge').textContent = net.method;
         item.querySelector('.path').textContent = pathOf(net.url);
         item.classList.toggle('hidden', !netItemVisible(item));
       }
@@ -1350,9 +1351,10 @@ final class XPHttpLogServer: @unchecked Sendable {
 
         const urlBar = document.createElement('div');
         urlBar.className = 'req-url';
-        urlBar.innerHTML = '<span class="method-pill ' + methodClass(net.method) + '">' + net.method + '</span>'
+        urlBar.innerHTML = '<span class="method-pill ' + methodClass(net.method) + '"></span>'
           + '<span class="u"></span>'
           + '<button class="icon-btn" title="Copy URL">' + COPY_SVG + '</button>';
+        urlBar.querySelector('.method-pill').textContent = net.method;
         urlBar.querySelector('.u').textContent = net.url;
         const urlCopy = urlBar.querySelector('.icon-btn');
         urlCopy.onclick = () => copyText(net.url, urlCopy);
@@ -1461,11 +1463,18 @@ final class XPHttpLogServer: @unchecked Sendable {
         const info = document.createElement('div');
         info.className = 'nav-info';
         const route = (ev.fromVC ? ev.fromVC + '  →  ' : '') + (ev.toVC || '?');
-        info.innerHTML =
-          '<span class="nav-type t-' + ev.type + '">' + ev.type.toUpperCase() + '</span>' +
-          '<span class="nav-route"></span>' +
-          '<span class="nav-time">' + fmtTime(ev.timestamp) + '</span>';
-        info.querySelector('.nav-route').textContent = route;
+        // Build via DOM, never innerHTML: ev.type is stream-supplied.
+        const navType = String(ev.type || '');
+        const typeEl = document.createElement('span');
+        typeEl.className = 'nav-type t-' + navType.toLowerCase().replace(/[^a-z]/g, '');
+        typeEl.textContent = navType.toUpperCase();
+        const routeEl = document.createElement('span');
+        routeEl.className = 'nav-route';
+        routeEl.textContent = route;
+        const timeEl = document.createElement('span');
+        timeEl.className = 'nav-time';
+        timeEl.textContent = fmtTime(ev.timestamp);
+        info.append(typeEl, routeEl, timeEl);
 
         item.appendChild(thumb);
         item.appendChild(info);
@@ -1608,8 +1617,8 @@ final class XPHttpLogServer: @unchecked Sendable {
               d.style.width = (iw * layFit) + 'px';
               d.style.height = (ih * layFit) + 'px';
               d.style.opacity = n.hidden ? 0.12 : Math.max(0.3, n.alpha);
-              if (n.img) {
-                d.style.backgroundImage = 'url(' + n.img + ')';
+              if (n.img && n.img.indexOf('data:image/') === 0) {
+                d.style.backgroundImage = 'url("' + n.img.replace(/["\\]/g, '\\$&') + '")';
                 d.style.backgroundSize = (n.w * layFit) + 'px ' + (n.h * layFit) + 'px';
                 d.style.backgroundPosition = (-(ix - n.x) * layFit) + 'px ' + (-(iy - n.y) * layFit) + 'px';
               }
@@ -1787,10 +1796,10 @@ final class XPHttpLogServer: @unchecked Sendable {
       // already in the hierarchy payload so a download always produces something.
       function downloadNodeImage(node, id) {
         if (!node) return;
-        fetch('/node/' + id + '/image')
+        fetch('/node/' + encodeURIComponent(id) + '/image')
           .then(r => r.ok ? r.blob() : Promise.reject(r.status))
           .then(blob => saveHref(URL.createObjectURL(blob), node.cls, 'png', true))
-          .catch(() => { if (node.img) saveHref(node.img, node.cls, 'jpg', false); });
+          .catch(() => { if (node.img && node.img.indexOf('data:image/') === 0) saveHref(node.img, node.cls, 'jpg', false); });
       }
       // Fetches one node's attributes. Guarded by propsReqId so an out-of-order
       // response (slow node, fast re-select) never overwrites the current one.
@@ -1800,7 +1809,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         propsGroupsEl.innerHTML = '';
         propsEmptyEl.textContent = 'Loading…';
         propsEmptyEl.classList.remove('hidden');
-        fetch('/node/' + id).then(r => {
+        fetch('/node/' + encodeURIComponent(id)).then(r => {
           if (reqId !== propsReqId) return null;
           if (r.status === 404) { propsEmptyEl.textContent = 'View no longer live — re-capture.'; return null; }
           if (!r.ok) { propsEmptyEl.textContent = 'Properties unavailable.'; return null; }
