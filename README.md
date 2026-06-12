@@ -5,7 +5,7 @@ The iOS SDK for [Xpector](https://github.com/arimunandar/xpector) — a real-tim
 Two ways to use it:
 
 1. **Mac app** — connect over USB/WiFi for the full inspector (hierarchy, automation, recording, remote viewing). See [Quick Start](#quick-start).
-2. **Browser viewer** — open a URL on any device on the same WiFi for a live, read-only inspector: Logs, Network, Leaks, Current screen, Navigation flow, and an interactive **3D view hierarchy with a property inspector**. No Mac, no USB. See [Browser viewer](#watch-everything-in-any-browser-same-wifi).
+2. **Browser viewer** — open a URL on any device on the same WiFi for a live, read-only inspector: Logs, Network, Leaks, Current screen, Navigation flow, and an interactive **3D view hierarchy with a property inspector**. No Mac, no USB. See [Browser viewer](#watch-everything-in-any-browser-same-wifi). For watching from **any network** (off-LAN — remote tester, cellular), see the [Cloud relay](#cloud-relay--watch-from-any-network-off-lan).
 
 ## Installation
 
@@ -140,48 +140,7 @@ XpectorServer.shared.presentLogViewer()
 instantly. It returns `false` (without presenting) when the viewer isn't running.
 
 When the **cloud relay** is configured (DEBUG-only), the sheet adds a **Cloud**
-tab. No off-LAN link is minted automatically — tap **Generate** on that tab to
-provision a private `relay.xpector.cloud` link on demand (and **Regenerate** to
-mint a fresh one and revoke the old).
-
-### Cloud relay — get a key & self-host
-
-The cloud relay lets a browser on **any** network watch a device live (the app
-dials out over HTTPS). It needs a relay and an **ingest key** (DEBUG-only — never
-ship it in Release). The relay is multi-tenant: every key is its own isolated
-tenant.
-
-**1. Get a key.** Mint one against a relay (self-service, no account):
-
-```bash
-curl -X POST https://relay.xpector.cloud/api/keys -d '{"label":"my app"}'
-# → { "ingestKey": "xpk_…", "tenantId": "t_…" }
-```
-
-**2. Configure the app** (DEBUG only — load the key from an xcconfig / env, don't commit it):
-
-```swift
-#if DEBUG
-var config = XPConfiguration()
-config.enableCloudRelay = true
-config.cloudRelayBaseURL = "https://relay.xpector.cloud"
-config.cloudRelayIngestKey = myDebugIngestKey   // the xpk_… from step 1
-XpectorServer.shared.start(config: config)
-#endif
-```
-
-**Self-host your own relay** (recommended for teams — full isolation, your own
-quota): the entire relay is in [`cloud/`](cloud/). Deploy it to your own Cloudflare
-account and either self-mint keys or set `ADMIN_KEY` to control issuance:
-
-```bash
-cd cloud && npm install
-wrangler secret put TOKEN_SECRET     # required (openssl rand -hex 32)
-wrangler deploy                      # → https://xpector-relay.<you>.workers.dev
-```
-
-Point `cloudRelayBaseURL` at your deployment. See [`cloud/README.md`](cloud/README.md)
-for the full key/tenant API (`POST /api/keys`, rate limits, `ADMIN_KEY`, revocation).
+tab with a **Generate** button — see [Cloud relay](#cloud-relay--watch-from-any-network-off-lan) below.
 
 ### Ports & opt-out
 
@@ -199,6 +158,104 @@ for the full key/tenant API (`POST /api/keys`, rate limits, `ADMIN_KEY`, revocat
 > browser can't trust a self-signed cert on a bare LAN IP without friction, and
 > the local trust boundary makes it unnecessary). Logs can contain secrets/PII,
 > as with every Xpector channel — keep it to networks you trust.
+
+## Cloud relay — watch from any network (off-LAN)
+
+The LAN viewer above needs you on the **same WiFi**. The **cloud relay** removes
+that: the app dials **out** over HTTPS to a relay, and a browser anywhere opens a
+private link — for a remote tester, a shared session, or a device on cellular.
+It's **DEBUG-only** and **opt-in**, and nothing leaves the device until you tap
+**Generate** in-app.
+
+It needs two things: a **relay** (the hosted `relay.xpector.cloud`, or your own)
+and an **ingest key**. The relay is multi-tenant — every key is its own isolated
+tenant, so you can safely mint your own.
+
+### Step 1 — Generate an ingest key
+
+Self-service, no account. One request to the relay returns a key:
+
+```bash
+curl -X POST https://relay.xpector.cloud/api/keys -d '{"label":"my app"}'
+```
+```json
+{ "ingestKey": "xpk_4Tsg…", "tenantId": "t_OvN6…", "createdAt": 1781234723114 }
+```
+
+**Save the `ingestKey` now — it's shown only once.** Treat it like a password
+(it lets a holder mint sessions on your tenant). Revoke it any time:
+
+```bash
+curl -X POST https://relay.xpector.cloud/api/keys/revoke -H "Authorization: Bearer xpk_4Tsg…"
+```
+
+### Step 2 — Give the key to your app (without committing it)
+
+Never hardcode the key in committed source. The simplest approach is to read it
+from the **scheme's environment** (Xcode → Edit Scheme → Run → Arguments →
+Environment Variables, e.g. `XP_RELAY_KEY`):
+
+```swift
+import XpectorServer
+
+@main
+struct MyApp: App {
+    init() {
+        #if DEBUG
+        var config = XPConfiguration()
+        if let key = ProcessInfo.processInfo.environment["XP_RELAY_KEY"], !key.isEmpty {
+            config.enableCloudRelay = true
+            config.cloudRelayBaseURL = "https://relay.xpector.cloud"  // or your own relay
+            config.cloudRelayIngestKey = key                          // the xpk_… from Step 1
+        }
+        XpectorServer.shared.start(config: config)
+        #endif
+    }
+    var body: some Scene { WindowGroup { ContentView() } }
+}
+```
+
+> For a team, a gitignored `Secrets.xcconfig` (surfaced via Info.plist and read
+> with `Bundle.main.object(forInfoDictionaryKey:)`) works the same way. The key
+> is `#if DEBUG`-gated and compiled out of Release entirely, so it never ships.
+
+### Step 3 — Generate a share link in-app
+
+Run the app, then present the connect sheet — `presentLogViewer()` now shows a
+**Cloud** tab next to Wi‑Fi:
+
+```swift
+XpectorServer.shared.presentLogViewer()
+```
+
+Tap **Generate** on the Cloud tab to mint a private `relay.xpector.cloud/v/…`
+link (QR + Copy) that opens from any network. **Regenerate** mints a fresh one
+and instantly kills the old. (Nothing is sent to the relay until you tap
+Generate.) In code: `cloudViewerURL()`, `generateCloudViewer { url in … }`,
+`regenerateCloudViewer { url in … }`.
+
+### Optional — Self-host your own relay
+
+Recommended for teams (full isolation, your own quota, your own data path). The
+entire relay is in [`cloud/`](cloud/) — deploy it to your own Cloudflare account:
+
+```bash
+cd cloud && npm install
+wrangler secret put TOKEN_SECRET     # required — openssl rand -hex 32
+wrangler deploy                      # → https://xpector-relay.<you>.workers.dev
+```
+
+Then point `cloudRelayBaseURL` at your deployment and mint keys against it
+(`POST <your-relay>/api/keys`). To **close** self-service issuance so only you
+can mint keys, set the optional `ADMIN_KEY` secret — then `/api/keys` requires
+`Authorization: Bearer <ADMIN_KEY>`. Full key/tenant API (rate limits, revocation,
+tenant isolation) is in [`cloud/README.md`](cloud/README.md).
+
+> **Security.** DEBUG-only; the ingest key is compiled out of Release. Network
+> bodies and credential headers are **redacted again** on the cloud leg, the
+> relay is TLS-only, viewer links are short-lived HMAC tokens, and tenants are
+> isolated. Still, a cloud link is more exposed than a LAN socket — only generate
+> one when you mean to share.
 
 ## Enabling in non-Release configurations
 
