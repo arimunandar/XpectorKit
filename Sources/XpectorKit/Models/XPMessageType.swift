@@ -18,6 +18,7 @@ public enum XPMessageType: UInt32, Codable, Sendable {
     case networkEvent = 500
     case requestRecentNetwork = 501
     case recentNetworkData = 502
+    case wsEvent = 503
     case requestNavState = 530
     case navStateData = 531
     case navEvent = 532

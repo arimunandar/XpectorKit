@@ -4,6 +4,12 @@ public struct XPConfiguration: Sendable {
     public var port: UInt16
     public var enableNetworkCapture: Bool
     public var enableAutomaticNetworkInterception: Bool
+    /// Auto-captures `URLSessionWebSocketTask` connections + messages (the new
+    /// Sockets tab), decoding protobuf binary frames to a readable tree. Gates WS
+    /// capture independently; still overall DEBUG-gated and requires
+    /// `enableNetworkCapture`. The swizzle touches a private Apple subclass, so
+    /// it is compiled out of Release builds entirely.
+    public var enableWebSocketCapture: Bool
     public var enableNavigationCapture: Bool
     public var enableNavigationScreenshots: Bool
     public var enablePerformanceCapture: Bool
@@ -32,6 +38,7 @@ public struct XPConfiguration: Sendable {
         port: UInt16 = 47164,
         enableNetworkCapture: Bool = true,
         enableAutomaticNetworkInterception: Bool = true,
+        enableWebSocketCapture: Bool = true,
         enableNavigationCapture: Bool = true,
         enableNavigationScreenshots: Bool = true,
         enablePerformanceCapture: Bool = true,
@@ -50,6 +57,7 @@ public struct XPConfiguration: Sendable {
         self.port = port
         self.enableNetworkCapture = enableNetworkCapture
         self.enableAutomaticNetworkInterception = enableAutomaticNetworkInterception
+        self.enableWebSocketCapture = enableWebSocketCapture
         self.enableNavigationCapture = enableNavigationCapture
         self.enableNavigationScreenshots = enableNavigationScreenshots
         self.enablePerformanceCapture = enablePerformanceCapture

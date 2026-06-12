@@ -35,6 +35,9 @@ final class XPHttpLogServer: @unchecked Sendable {
     private let recentNetwork: () -> [XPNetworkEntry]
     private let recentLeaks: () -> [XPPerfEvent]
     private let recentNav: () -> [XPNavEvent]
+    /// Snapshot of recent WebSocket events (already redacted), replayed to a
+    /// fresh viewer so its Sockets tab shows connection history immediately.
+    private let recentWS: () -> [XPWSEvent]
     /// Captures the current screen as JPEG bytes on demand (for `GET /screen`).
     /// Returns nil if no screen is available. Provided by `XpectorServer`, which
     /// hops to the main thread for the UIKit snapshot.
@@ -71,6 +74,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         recentNetwork: @escaping () -> [XPNetworkEntry] = { [] },
         recentLeaks: @escaping () -> [XPPerfEvent] = { [] },
         recentNav: @escaping () -> [XPNavEvent] = { [] },
+        recentWS: @escaping () -> [XPWSEvent] = { [] },
         currentScreenshot: @escaping () -> Data? = { nil },
         layersJSON: ((@escaping (Data?) -> Void) -> Void)? = nil,
         nodeDetailJSON: ((String, @escaping (Data?) -> Void) -> Void)? = nil,
@@ -85,6 +89,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         self.recentNetwork = recentNetwork
         self.recentLeaks = recentLeaks
         self.recentNav = recentNav
+        self.recentWS = recentWS
         self.currentScreenshot = currentScreenshot
     }
 
@@ -153,6 +158,13 @@ final class XPHttpLogServer: @unchecked Sendable {
     func pushNav(_ event: XPNavEvent) {
         guard let json = encode(event) else { return }
         broadcastRaw("event: nav\ndata: \(json)\n\n")
+    }
+
+    /// Push one WebSocket event as a named `ws` SSE event. Pass the redacted
+    /// event — the browser is off-device.
+    func pushWS(_ event: XPWSEvent) {
+        guard let json = encode(event) else { return }
+        broadcastRaw("event: ws\ndata: \(json)\n\n")
     }
 
     private func encode<T: Encodable>(_ value: T) -> String? {
@@ -457,6 +469,10 @@ final class XPHttpLogServer: @unchecked Sendable {
             guard let json = encode(event) else { continue }
             if !writeChunk(fd, "event: nav\ndata: \(json)\n\n") { return }
         }
+        for event in recentWS() {
+            guard let json = encode(event) else { continue }
+            if !writeChunk(fd, "event: ws\ndata: \(json)\n\n") { return }
+        }
         // The fd stays open and registered; live pushes + keepalives flow until
         // a write fails (client gone), which prunes it.
     }
@@ -718,6 +734,37 @@ final class XPHttpLogServer: @unchecked Sendable {
       .j-key { color: #7fb0ff; } .j-str { color: #3ddc84; } .j-num { color: #f5c451; }
       .j-bool { color: #c39bff; } .j-null { color: #ff6b61; }
 
+      /* sockets — connection list + message timeline (mirrors the network split) */
+      #ws { display: flex; height: 100%; }
+      .ws-list { flex: 0 0 38%; max-width: 420px; overflow-y: auto; border-right: 1px solid #23272e; }
+      .ws-conn { padding: 9px 12px; border-bottom: 1px solid #1a1d23; cursor: pointer; }
+      .ws-conn:hover { background: #15181d; }
+      .ws-conn.sel { background: #1c2027; }
+      .ws-conn.hidden { display: none; }
+      .ws-conn .ws-host { color: #d6dae0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .ws-conn .ws-sub { color: #5d646e; font-size: 11px; display: flex; gap: 9px; margin-top: 3px; align-items: center; }
+      .ws-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+      .ws-dot.open { background: #3ddc84; } .ws-dot.closed { background: #8b929c; }
+      .ws-detail { flex: 1 1 auto; overflow-y: auto; padding: 16px 18px; }
+      .ws-empty { color: #5d646e; padding: 24px; text-align: center; }
+      .ws-msg { display: flex; gap: 9px; align-items: center; padding: 7px 9px; border-bottom: 1px solid #1a1d23; cursor: pointer; }
+      .ws-msg:hover { background: #15181d; }
+      .ws-arrow { font-weight: 700; flex: 0 0 auto; }
+      .ws-arrow.out { color: #f5c451; } .ws-arrow.in { color: #3ddc84; }
+      .ws-op { font-size: 9.5px; font-weight: 700; letter-spacing: .3px; padding: 1px 6px; border-radius: 5px; flex: 0 0 auto; }
+      .ws-op.text { background: rgba(127,176,255,.16); color: #7fb0ff; }
+      .ws-op.binary { background: rgba(195,155,255,.16); color: #c39bff; }
+      .ws-msg .ws-prev { flex: 1 1 auto; color: #b6bcc6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .ws-msg .ws-meta { color: #5d646e; font-size: 11px; flex: 0 0 auto; }
+      .ws-pay-toggle { display: flex; gap: 6px; margin: 8px 0; flex-wrap: wrap; }
+      .ws-pay-toggle button {
+        background: #20242b; color: #9aa1ab; border: 1px solid #2a2f37; padding: 4px 10px;
+        border-radius: 6px; font: inherit; font-size: 11.5px; cursor: pointer;
+      }
+      .ws-pay-toggle button.active { background: #2a2f37; color: #fff; border-color: #3a6fae; }
+      .ws-event-line { color: #8b929c; padding: 8px 9px; border-bottom: 1px solid #1a1d23; font-size: 12px; }
+      .ws-event-line .k { color: #f5c451; }
+
       /* leaks */
       .leak-list { height: 100%; overflow-y: auto; padding: 6px 14px; }
       .leak-item { border-bottom: 1px solid #1a1d23; padding: 9px 4px; cursor: pointer; }
@@ -944,6 +991,15 @@ final class XPHttpLogServer: @unchecked Sendable {
         #net.show-detail .net-detail { transform: translateX(0); }
         .net-back { display: inline-flex; }
 
+        /* Sockets: same master → detail slide-over as Network */
+        #ws { position: relative; }
+        .ws-list { flex: 1 1 100%; max-width: none; border-right: none; }
+        .ws-detail {
+          position: absolute; inset: 0; background: #0d0f12;
+          transform: translateX(100%); transition: transform .22s ease; z-index: 6;
+        }
+        #ws.show-detail .ws-detail { transform: translateX(0); }
+
         .panel { max-height: none; }             /* let detail bodies flow */
         #screenImg { max-height: none; }         /* image scrolls naturally */
         .nav-thumb { width: 64px; height: 116px; }
@@ -989,6 +1045,7 @@ final class XPHttpLogServer: @unchecked Sendable {
       <nav class="tabs">
         <button class="tab active" id="tabLogs"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg><span class="tl">Logs</span></button>
         <button class="tab" id="tabNet"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3l4 4-4 4M20 7H8M8 21l-4-4 4-4M4 17h12"/></svg><span class="tl">Network</span><span class="count" id="netCount">0</span></button>
+        <button class="tab" id="tabWS"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 8l-4 4 4 4M17 8l4 4-4 4M14 4l-4 16"/></svg><span class="tl">Sockets</span><span class="count" id="wsCount">0</span></button>
         <button class="tab" id="tabLeak"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3c3 4 6 7 6 11a6 6 0 0 1-12 0c0-4 3-7 6-11z"/></svg><span class="tl">Leaks</span><span class="count" id="leakCount">0</span></button>
         <button class="tab" id="tabScreen"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="3" width="12" height="18" rx="2"/><path d="M11 18h2"/></svg><span class="tl">Current</span></button>
         <button class="tab" id="tabNav"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="2"/><circle cx="19" cy="18" r="2"/><path d="M7 6h7a3 3 0 0 1 3 3v7"/></svg><span class="tl">Flow</span><span class="count" id="navCount">0</span></button>
@@ -999,6 +1056,12 @@ final class XPHttpLogServer: @unchecked Sendable {
         <div id="net">
           <div class="net-list" id="netList"></div>
           <div class="net-detail" id="netDetail"><div class="net-empty">Select a request to inspect it.</div></div>
+        </div>
+      </div>
+      <div class="view hidden" id="wsView">
+        <div id="ws">
+          <div class="ws-list" id="wsList"><div class="ws-empty">No socket connections yet.</div></div>
+          <div class="ws-detail" id="wsDetail"><div class="ws-empty">Select a connection to inspect it.</div></div>
         </div>
       </div>
       <div class="view hidden" id="leaksView">
@@ -1085,19 +1148,20 @@ final class XPHttpLogServer: @unchecked Sendable {
       }
 
       // ---- tabs ----
-      const TABS = [['tabLogs','logs','logsView'],['tabNet','net','netView'],['tabLeak','leaks','leaksView'],
+      const TABS = [['tabLogs','logs','logsView'],['tabNet','net','netView'],['tabWS','ws','wsView'],['tabLeak','leaks','leaksView'],
                     ['tabScreen','screen','screenView'],['tabNav','nav','navView'],['tabLayers','layers','layersView']];
       function setView(v) {
         activeView = v;
         document.body.dataset.tab = v;
         netEl.classList.remove('show-detail');   // always land on the request list
+        const wsRoot = document.getElementById('ws'); if (wsRoot) wsRoot.classList.remove('show-detail');
 
         for (const [tabId, val, viewId] of TABS) {
           document.getElementById(tabId).classList.toggle('active', v === val);
           document.getElementById(viewId).classList.toggle('hidden', v !== val);
         }
         filterEl.placeholder = v === 'net' ? 'filter requests…' : v === 'leaks' ? 'filter leaks…'
-          : v === 'nav' ? 'filter navigation…' : 'filter logs…';
+          : v === 'nav' ? 'filter navigation…' : v === 'ws' ? 'filter sockets…' : 'filter logs…';
         if (v === 'screen') startScreenPolling(); else stopScreenPolling();
         if (v === 'layers') { loadLayers(true); startLayersLive(); } else { stopLayersLive(); }
         applyFilter();
@@ -1875,12 +1939,233 @@ final class XPHttpLogServer: @unchecked Sendable {
       layersResizerEl.addEventListener('pointerup', endRz);
       layersResizerEl.addEventListener('pointercancel', endRz);
 
+      // ---- sockets (websocket connections + message timeline) ----
+      const wsListEl = document.getElementById('wsList');
+      const wsDetailEl = document.getElementById('wsDetail');
+      const wsRootEl = document.getElementById('ws');
+      const wsCountEl = document.getElementById('wsCount');
+      const wsConns = {};       // cid -> { cid, url, headers, messages[], closed, closeInfo }
+      const wsOrder = [];       // cids, newest connection first
+      let wsSelected = null;
+      const wsPayMode = {};     // 'cid:idx' -> chosen payload view, so it sticks
+
+      function wsConnLabel(c) {
+        try { const u = new URL(c.url); return u.host + (u.pathname || ''); } catch (_) { return c.url || 'socket'; }
+      }
+      function wsPreview(m) {
+        if (m.opcode === 'binary') return m.protobuf ? '[protobuf · ' + ((m.protobuf.fields || []).length) + ' fields]' : '[binary ' + fmtBytes(m.byteSize) + ']';
+        return (m.textPayload || '').slice(0, 200);
+      }
+      function addWS(ev) {
+        if (!firstSeen(ev.id)) return;
+        const cid = ev.connectionId;
+        let c = wsConns[cid];
+        if (!c) {
+          const empty = wsListEl.querySelector('.ws-empty'); if (empty) empty.remove();
+          c = { cid: cid, url: ev.url || '', headers: ev.requestHeaders || {}, messages: [], closed: false, closeInfo: null };
+          wsConns[cid] = c; wsOrder.unshift(cid);
+        }
+        if (ev.kind === 'connect') {
+          if (ev.url) c.url = ev.url;
+          if (ev.requestHeaders) c.headers = ev.requestHeaders;
+        } else if (ev.kind === 'message') {
+          c.messages.push(ev);
+        } else if (ev.kind === 'close') {
+          c.closed = true; c.closeInfo = ev;
+        }
+        wsCountEl.textContent = wsOrder.length;
+        refreshWSConn(c);
+        if (wsSelected === cid) renderWSDetail(c);
+        else if (wsSelected === null) selectWS(cid);
+      }
+      function refreshWSConn(c) {
+        let row = wsListEl.querySelector('[data-cid="' + c.cid + '"]');
+        if (!row) {
+          row = document.createElement('div');
+          row.className = 'ws-conn';
+          row.dataset.cid = c.cid;
+          row.onclick = () => selectWS(c.cid);
+          wsListEl.insertBefore(row, wsListEl.firstChild);   // newest on top
+        }
+        row.dataset.search = c.url || '';
+        let inN = 0, outN = 0;
+        for (const m of c.messages) { if (m.direction === 'in') inN++; else outN++; }
+        row.innerHTML = '<div class="ws-host"></div><div class="ws-sub">'
+          + '<span class="ws-dot ' + (c.closed ? 'closed' : 'open') + '"></span>'
+          + '<span>' + (c.closed ? 'closed' : 'open') + '</span>'
+          + '<span>↑ ' + outN + '</span><span>↓ ' + inN + '</span></div>';
+        row.querySelector('.ws-host').textContent = wsConnLabel(c);
+        row.classList.toggle('sel', wsSelected === c.cid);
+        row.classList.toggle('hidden', !matches(row.dataset.search));
+      }
+      function selectWS(cid) {
+        wsSelected = cid;
+        for (const el of wsListEl.children) if (el.dataset && el.dataset.cid) el.classList.toggle('sel', el.dataset.cid === cid);
+        renderWSDetail(wsConns[cid]);
+        if (isMobile()) wsRootEl.classList.add('show-detail');
+      }
+      function renderWSDetail(c) {
+        if (!c) { wsDetailEl.innerHTML = '<div class="ws-empty">Select a connection to inspect it.</div>'; return; }
+        const wrap = document.createElement('div');
+
+        const back = document.createElement('button');
+        back.className = 'net-back'; back.textContent = '← Connections';
+        back.onclick = () => wsRootEl.classList.remove('show-detail');
+        wrap.appendChild(back);
+
+        const urlBar = document.createElement('div');
+        urlBar.className = 'req-url';
+        urlBar.innerHTML = '<span class="method-pill m-PUT">WS</span><span class="u"></span>';
+        urlBar.querySelector('.u').textContent = c.url || '(unknown)';
+        wrap.appendChild(urlBar);
+
+        if (c.headers && Object.keys(c.headers).length) {
+          const sec = document.createElement('div'); sec.className = 'sec';
+          const head = document.createElement('div'); head.className = 'sec-head';
+          head.innerHTML = '<div class="sec-title">Handshake Headers</div>';
+          sec.appendChild(head); sec.appendChild(headersTable(c.headers));
+          wrap.appendChild(sec);
+        }
+
+        const sec = document.createElement('div'); sec.className = 'sec';
+        const head = document.createElement('div'); head.className = 'sec-head';
+        head.innerHTML = '<div class="sec-title">Messages (' + c.messages.length + ')</div>';
+        sec.appendChild(head);
+        // Newest first, so live frames land at the top without scrolling.
+        if (c.closed && c.closeInfo) {
+          const cl = document.createElement('div'); cl.className = 'ws-event-line';
+          const ci = c.closeInfo;
+          let t = 'CLOSED';
+          if (ci.closeCode) t += ' · code ' + ci.closeCode;
+          if (ci.closeReason) t += ' · ' + ci.closeReason;
+          if (ci.error) t += ' · ' + ci.error;
+          cl.innerHTML = '<span class="k">●</span> ';
+          cl.appendChild(document.createTextNode(t));
+          sec.appendChild(cl);
+        }
+        if (!c.messages.length) {
+          const e = document.createElement('div'); e.className = 'ws-event-line'; e.textContent = 'No messages yet.';
+          sec.appendChild(e);
+        }
+        for (let i = c.messages.length - 1; i >= 0; i--) sec.appendChild(wsMsgRow(c, c.messages[i], i));
+        wrap.appendChild(sec);
+        wsDetailEl.innerHTML = ''; wsDetailEl.appendChild(wrap);
+      }
+      function wsMsgRow(c, m, i) {
+        const box = document.createElement('div');
+        const row = document.createElement('div'); row.className = 'ws-msg';
+        const dir = m.direction === 'out' ? 'out' : 'in';
+        const arrow = dir === 'out' ? '↑' : '↓';
+        const op = m.opcode || 'text';
+        row.innerHTML = '<span class="ws-arrow ' + dir + '">' + arrow + '</span>'
+          + '<span class="ws-op ' + op + '">' + op.toUpperCase() + '</span>'
+          + '<span class="ws-prev"></span>'
+          + '<span class="ws-meta">' + fmtBytes(m.byteSize) + ' · ' + fmtTime(m.timestamp) + '</span>';
+        row.querySelector('.ws-prev').textContent = wsPreview(m);
+        const pay = document.createElement('div'); pay.style.display = 'none';
+        let built = false;
+        row.onclick = () => {
+          const show = pay.style.display === 'none';
+          pay.style.display = show ? 'block' : 'none';
+          if (show && !built) { built = true; buildWSPayload(pay, c, m, i); }
+        };
+        box.appendChild(row); box.appendChild(pay);
+        return box;
+      }
+      function buildWSPayload(container, c, m, i) {
+        container.innerHTML = '';
+        const modes = [];
+        if (m.opcode === 'binary') {
+          if (m.protobuf) modes.push('Protobuf');
+          modes.push('Hex', 'Base64', 'Text');
+        } else {
+          modes.push('Text');
+        }
+        const key = c.cid + ':' + i;
+        let mode = wsPayMode[key] && modes.includes(wsPayMode[key]) ? wsPayMode[key] : modes[0];
+        const bar = document.createElement('div'); bar.className = 'ws-pay-toggle';
+        const content = document.createElement('div');
+        function render() {
+          for (const b of bar.children) b.classList.toggle('active', b.textContent === mode);
+          content.innerHTML = '';
+          content.appendChild(wsPayloadNode(m, mode));
+        }
+        modes.forEach(md => {
+          const b = document.createElement('button'); b.textContent = md;
+          b.onclick = () => { mode = md; wsPayMode[key] = md; render(); };
+          bar.appendChild(b);
+        });
+        container.appendChild(bar); container.appendChild(content);
+        render();
+      }
+      function wsPayloadNode(m, mode) {
+        const pre = document.createElement('pre'); pre.className = 'panel';
+        if (mode === 'Protobuf' && m.protobuf) {
+          try { pre.innerHTML = highlightJSON(JSON.stringify(protoToPlain(m.protobuf), null, 2)); }
+          catch (_) { pre.textContent = '(decode error)'; }
+          return pre;
+        }
+        if (mode === 'Hex') { pre.textContent = hexDump(b64ToBytes(m.binaryBase64 || '')); return pre; }
+        if (mode === 'Base64') { pre.textContent = m.binaryBase64 || '(empty)'; return pre; }
+        // Text (default, and the only mode for text frames).
+        let txt = m.textPayload;
+        if (txt == null && m.binaryBase64 != null) {
+          try { txt = new TextDecoder().decode(b64ToBytes(m.binaryBase64)); } catch (_) { txt = ''; }
+        }
+        txt = txt || '(empty)';
+        try { pre.innerHTML = highlightJSON(JSON.stringify(JSON.parse(txt), null, 2)); }
+        catch (_) { pre.textContent = txt; }
+        return pre;
+      }
+      // Protobuf tree → a plain field-number-keyed object the JSON highlighter renders.
+      function protoValToPlain(v) {
+        switch (v && v.k) {
+          case 'varint': case 'fixed64': case 'fixed32': return v.v;
+          case 'string': return v.v;
+          case 'bytes': return 'base64:' + v.v;
+          case 'message': return protoToPlain(v.v);
+          case 'repeated': return (v.v || []).map(protoValToPlain);
+          default: return null;
+        }
+      }
+      function protoToPlain(msg) {
+        const o = {};
+        for (const f of (msg && msg.fields || [])) o['#' + f.field] = protoValToPlain(f.value);
+        return o;
+      }
+      function b64ToBytes(b64) {
+        try {
+          const bin = atob(b64); const a = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
+          return a;
+        } catch (_) { return new Uint8Array(0); }
+      }
+      function hexDump(bytes) {
+        let out = '';
+        for (let off = 0; off < bytes.length; off += 16) {
+          const slice = bytes.slice(off, off + 16);
+          let hex = '', asc = '';
+          for (let j = 0; j < 16; j++) {
+            if (j < slice.length) {
+              hex += slice[j].toString(16).padStart(2, '0') + ' ';
+              const ch = slice[j]; asc += (ch >= 32 && ch < 127) ? String.fromCharCode(ch) : '.';
+            } else { hex += '   '; }
+          }
+          out += off.toString(16).padStart(6, '0') + '  ' + hex + ' ' + asc + '\\n';
+        }
+        return out || '(empty)';
+      }
+
       // ---- filter / clear ----
       function applyFilter() {
         if (activeView === 'logs') {
           for (const row of logEl.children) row.classList.toggle('hidden', !matches(row.dataset.search));
         } else if (activeView === 'net') {
           for (const item of netListEl.children) item.classList.toggle('hidden', !netItemVisible(item));
+        } else if (activeView === 'ws') {
+          for (const row of wsListEl.children) {
+            if (row.dataset && row.dataset.cid != null) row.classList.toggle('hidden', !matches(row.dataset.search));
+          }
         } else if (activeView === 'leaks') {
           for (const item of leakListEl.children) {
             if (item.dataset.search != null) item.classList.toggle('hidden', !matches(item.dataset.search));
@@ -1895,6 +2180,13 @@ final class XPHttpLogServer: @unchecked Sendable {
       baseFilterEl.addEventListener('change', () => { baseFilter = baseFilterEl.value; applyFilter(); });
       document.getElementById('clear').addEventListener('click', () => {
         if (activeView === 'logs') { logEl.innerHTML = ''; return; }
+        if (activeView === 'ws') {
+          wsListEl.innerHTML = '<div class="ws-empty">No socket connections yet.</div>';
+          wsDetailEl.innerHTML = '<div class="ws-empty">Select a connection to inspect it.</div>';
+          for (const k in wsConns) delete wsConns[k];
+          wsOrder.length = 0; wsSelected = null; wsCountEl.textContent = '0';
+          return;
+        }
         if (activeView === 'leaks') {
           leakListEl.innerHTML = '<div class="leak-empty">No leaks detected yet.</div>';
           leakCount = 0; leakCountEl.textContent = '0';
@@ -1922,6 +2214,7 @@ final class XPHttpLogServer: @unchecked Sendable {
       es.onerror = () => { statusEl.className = 'status down'; statusEl.textContent = 'reconnecting…'; };
       es.onmessage = (e) => { try { appendLog(JSON.parse(e.data)); } catch (_) {} };
       es.addEventListener('net', (e) => { try { addNet(JSON.parse(e.data)); } catch (_) {} });
+      es.addEventListener('ws', (e) => { try { addWS(JSON.parse(e.data)); } catch (_) {} });
       es.addEventListener('leak', (e) => { try { addLeak(JSON.parse(e.data)); } catch (_) {} });
       es.addEventListener('nav', (e) => {
         try { addNav(JSON.parse(e.data)); } catch (_) {}

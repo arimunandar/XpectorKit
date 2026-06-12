@@ -23,6 +23,7 @@ public final class XpectorServer: @unchecked Sendable {
     private var pendingCrash: XPLogEntry?
     private var userDefaultsMonitor: XPUserDefaultsMonitor?
     private var networkCapture: XPNetworkCapture?
+    private var webSocketCapture: XPWebSocketCapture?
     private var navigationCapture: XPNavigationCapture?
     private var notificationCapture: XPNotificationCapture?
     private var performanceCapture: XPPerformanceCapture?
@@ -283,6 +284,7 @@ public final class XpectorServer: @unchecked Sendable {
                 },
                 recentLeaks: { XPInAppLeakStore.shared.entries() },
                 recentNav: { [weak self] in self?.getRecentNavEvents() ?? [] },
+                recentWS: { XPWebSocketCapture.shared.recentEvents(limit: 200) },
                 currentScreenshot: screenshotProvider,
                 layersJSON: layersProvider,
                 nodeDetailJSON: nodeDetailProvider,
@@ -381,6 +383,32 @@ public final class XpectorServer: @unchecked Sendable {
                 URLProtocol.registerClass(XPURLProtocolInterceptor.self)
                 XPURLProtocolInterceptor.installSessionConfigSwizzle()
             }
+
+            // WebSocket capture is a separate event family (the Sockets tab). The
+            // swizzle touches a private Apple subclass, so it's DEBUG-only; the
+            // capture sink + fan-out are wired the same way as `net`.
+            #if DEBUG
+            if config.enableWebSocketCapture {
+                let ws = XPWebSocketCapture.shared
+                ws.onEvent = { [weak self] event in
+                    // Redact on egress — the buffer is raw for the on-device inspector.
+                    let safe = XPWebSocketCapture.redactedEvent(event)
+                    self?.httpLogServer?.pushWS(safe)
+                    self?.cloudRelay?.pushWS(safe)
+                    guard let msg = try? XPMessage(type: .wsEvent, content: safe) else { return }
+                    self?.broadcast(message: msg)
+                }
+                ws.start()
+                webSocketCapture = ws
+                // Safety net against a relay feedback loop: never capture sockets
+                // pointed at the relay host.
+                if config.enableCloudRelay, let base = config.cloudRelayBaseURL,
+                   let host = URL(string: base)?.host {
+                    XPWebSocketInterceptor.addExcludedHost(host)
+                }
+                XPWebSocketInterceptor.install()
+            }
+            #endif
         }
 
         if config.enableNavigationCapture {
@@ -495,6 +523,7 @@ public final class XpectorServer: @unchecked Sendable {
             }
             foregroundObserver = nil
             networkCapture = nil
+            webSocketCapture = nil
             navigationCapture = nil
             notificationCapture = nil
             performanceCapture = nil
@@ -523,6 +552,13 @@ public final class XpectorServer: @unchecked Sendable {
         XPNetworkThrottleManager.shared.reset()
         snapshot.network?.stop()
         snapshot.network?.onEntry = nil
+
+        // WebSocket capture: make the swizzle inert and stop the sink (DEBUG-only).
+        #if DEBUG
+        XPWebSocketInterceptor.uninstall()
+        #endif
+        XPWebSocketCapture.shared.stop()
+        XPWebSocketCapture.shared.onEvent = nil
 
         snapshot.nav?.stop()
         snapshot.notif?.stop()
@@ -869,7 +905,7 @@ public final class XpectorServer: @unchecked Sendable {
         var caps = [
             "tagCorrelation",
             "hierarchy", "nodeDetail", "modifyAttribute", "screenshot",
-            "network", "throttling",
+            "network", "throttling", "websocket",
             "navigation", "context",
             "logs", "crash", "perf",
             "userDefaults", "threads",

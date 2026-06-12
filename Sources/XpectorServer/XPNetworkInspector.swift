@@ -455,6 +455,14 @@ public extension XpectorServer {
             URLProtocol.registerClass(XPURLProtocolInterceptor.self)
             XPURLProtocolInterceptor.installSessionConfigSwizzle()
 
+            // Same for the Sockets tab: ensure WS capture is buffering and the
+            // swizzle is installed (DEBUG-only) so the tab works even when opened
+            // standalone (shake-to-inspect) without the full server running.
+            XPWebSocketCapture.shared.ensureCapturing()
+            #if DEBUG
+            XPWebSocketInterceptor.install()
+            #endif
+
             guard let top = XPInspectorPresenter.topViewController() else { return }
             // Don't stack a second inspector.
             if top is UIHostingController<XPInspectorRoot> { return }

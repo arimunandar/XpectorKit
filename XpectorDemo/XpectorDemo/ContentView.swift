@@ -7,11 +7,79 @@ private let logger = XPLogger(category: "Demo")
 
 private let monitoredSession = XPNetworkCapture.shared.monitoredSession(configuration: .default)
 
+/// Drives the WebSocket demo using a **plain** `URLSessionWebSocketTask` — no
+/// Xpector calls in this code at all. That proves the auto-swizzle captures
+/// WebSocket traffic with zero integration, exactly like the HTTP interceptor.
+/// Point it at the bundled `ws-test-server` (`node ws-test-server/server.mjs`);
+/// `127.0.0.1` on the Simulator is the host Mac's loopback.
+final class WSDemoModel: ObservableObject {
+    @Published var status = "disconnected"
+    private var task: URLSessionWebSocketTask?
+
+    func connect() {
+        guard let url = URL(string: "ws://127.0.0.1:8080/") else { return }
+        let t = URLSession.shared.webSocketTask(with: url)
+        task = t
+        t.resume()
+        status = "connected"
+        receive()
+    }
+
+    private func receive() {
+        task?.receive { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.receive()   // keep the read loop going
+            case .failure(let error):
+                DispatchQueue.main.async { self.status = "closed: \(error.localizedDescription)" }
+            }
+        }
+    }
+
+    func sendText() {
+        task?.send(.string("{\"hello\":\"from demo\",\"n\":\(Int.random(in: 1...999))}")) { _ in }
+    }
+
+    func sendProtobuf() {
+        task?.send(.data(Self.sampleProtobuf())) { _ in }
+    }
+
+    func disconnect() {
+        task?.cancel(with: .goingAway, reason: nil)
+        task = nil
+        DispatchQueue.main.async { self.status = "disconnected" }
+    }
+
+    /// Hand-encodes a small protobuf message (varint + string + repeated +
+    /// nested) so the schema-less decoder has real wire data to render.
+    static func sampleProtobuf() -> Data {
+        func varint(_ value: UInt64) -> [UInt8] {
+            var n = value, out = [UInt8]()
+            repeat { var b = UInt8(n & 0x7f); n >>= 7; if n > 0 { b |= 0x80 }; out.append(b) } while n > 0
+            return out
+        }
+        func tag(_ field: Int, _ wire: UInt8) -> [UInt8] { varint(UInt64(field << 3) | UInt64(wire)) }
+        func pv(_ field: Int, _ n: UInt64) -> [UInt8] { tag(field, 0) + varint(n) }
+        func ps(_ field: Int, _ s: String) -> [UInt8] {
+            let b = [UInt8](s.utf8); return tag(field, 2) + varint(UInt64(b.count)) + b
+        }
+        let inner = pv(1, 7) + ps(2, "nested")
+        var bytes = [UInt8]()
+        bytes += pv(1, 1234)
+        bytes += ps(2, "xpector")
+        bytes += ps(3, "tag-a"); bytes += ps(3, "tag-b")
+        bytes += tag(4, 2) + varint(UInt64(inner.count)) + inner
+        return Data(bytes)
+    }
+}
+
 struct ContentView: View {
     @State private var logCount = 0
     @State private var defaultsKey = "demo_counter"
     @State private var defaultsValue = 0
     @State private var networkStatus = ""
+    @StateObject private var wsDemo = WSDemoModel()
 
     var body: some View {
         NavigationStack {
@@ -74,6 +142,19 @@ struct ContentView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                }
+
+                Section("WebSocket (auto-captured)") {
+                    Button("Connect (ws://127.0.0.1:8080)") { wsDemo.connect() }
+                    Button("Send text message") { wsDemo.sendText() }
+                    Button("Send protobuf message") { wsDemo.sendProtobuf() }
+                    Button("Disconnect") { wsDemo.disconnect() }
+                    Text("Status: \(wsDemo.status)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Run `node ws-test-server/server.mjs` first. Uses a plain URLSessionWebSocketTask — captured with zero SDK calls.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("stdout / stderr") {

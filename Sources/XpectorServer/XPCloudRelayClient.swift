@@ -130,6 +130,7 @@ final class XPCloudRelayClient: @unchecked Sendable {
     func pushNetwork(_ entry: XPNetworkEntry) { send("net", cloudSafe(entry)) }
     func pushLeak(_ event: XPPerfEvent) { send("leak", event) }
     func pushNav(_ event: XPNavEvent) { send("nav", event) }
+    func pushWS(_ event: XPWSEvent) { send("ws", cloudSafeWS(event)) }
 
     // MARK: - Connection lifecycle (all on `queue`)
 
@@ -231,7 +232,19 @@ final class XPCloudRelayClient: @unchecked Sendable {
         }
         var req = URLRequest(url: url)
         req.setValue("Bearer \(ingestKey)", forHTTPHeaderField: "Authorization")
+        // The relay's OWN socket must never be captured by the WS swizzle — every
+        // relayed frame would otherwise become a captured WS event that's re-sent
+        // over the relay, an exponential feedback loop. Suppress capture across
+        // creation, then stamp the exclusion marker (belt-and-suspenders with the
+        // host-match exclusion registered in XpectorServer).
+        #if DEBUG
+        XPWebSocketInterceptor.captureSuppressed = true
+        #endif
         let ws = session.webSocketTask(with: req)
+        #if DEBUG
+        XPWebSocketInterceptor.captureSuppressed = false
+        XPWebSocketInterceptor.markExcluded(ws)
+        #endif
         task = ws
         connected = true
         reconnectAttempt = 0
@@ -416,6 +429,25 @@ final class XPCloudRelayClient: @unchecked Sendable {
             requestBodyPreview: e.requestBodyPreview, responseBodyPreview: e.responseBodyPreview,
             durationMs: e.durationMs, bytesReceived: e.bytesReceived, error: e.error,
             timestamp: e.timestamp
+        )
+    }
+
+    /// Extra header redaction for the WS connect frame on the cloud leg (the LAN
+    /// event is already value-redacted; this strips whole credential headers by
+    /// name, mirroring `cloudSafe`).
+    private func cloudSafeWS(_ e: XPWSEvent) -> XPWSEvent {
+        guard redactSensitiveHeaders, let headers = e.requestHeaders else { return e }
+        let sensitive: Set<String> = [
+            "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key",
+        ]
+        let scrubbed = headers.reduce(into: [String: String]()) { acc, kv in
+            acc[kv.key] = sensitive.contains(kv.key.lowercased()) ? "<redacted>" : kv.value
+        }
+        return XPWSEvent(
+            id: e.id, connectionId: e.connectionId, kind: e.kind, direction: e.direction,
+            opcode: e.opcode, url: e.url, requestHeaders: scrubbed, textPayload: e.textPayload,
+            binaryBase64: e.binaryBase64, byteSize: e.byteSize, closeCode: e.closeCode,
+            closeReason: e.closeReason, error: e.error, timestamp: e.timestamp, protobuf: e.protobuf
         )
     }
 

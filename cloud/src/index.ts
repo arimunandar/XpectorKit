@@ -35,9 +35,9 @@ export interface Env {
 
 // ----- event protocol (app → DO → browser) ----------------------------------
 
-type EventType = "log" | "net" | "leak" | "nav";
-const SSE_EVENT: Record<EventType, string> = { log: "", net: "net", leak: "leak", nav: "nav" };
-const CAP: Record<EventType, number> = { log: 100, net: 50, leak: 200, nav: 40 };
+type EventType = "log" | "net" | "leak" | "nav" | "ws";
+const SSE_EVENT: Record<EventType, string> = { log: "", net: "net", leak: "leak", nav: "nav", ws: "ws" };
+const CAP: Record<EventType, number> = { log: 100, net: 50, leak: 200, nav: 40, ws: 400 };
 
 // Device-pull paths the cloud viewer proxies back to the app.
 function isDevicePath(path: string): boolean {
@@ -369,7 +369,7 @@ interface DeviceResponse {
 export class XPSessionRelay extends DurableObject<Env> {
   private producer: WebSocket | null = null;
   private viewers = new Set<WritableStreamDefaultWriter>();
-  private buffers: Record<EventType, BufferedEvent[]> = { log: [], net: [], leak: [], nav: [] };
+  private buffers: Record<EventType, BufferedEvent[]> = { log: [], net: [], leak: [], nav: [], ws: [] };
   private sessionName = "";
   private ownerTid: string | null = null;
   private revoked = false;
@@ -537,7 +537,7 @@ export class XPSessionRelay extends DurableObject<Env> {
     this.viewers.add(writer);
     this.ensureAlarm();
 
-    const order: EventType[] = ["log", "net", "leak", "nav"];
+    const order: EventType[] = ["log", "net", "leak", "nav", "ws"];
     let preamble = ":connected\n\n";
     for (const t of order) for (const ev of this.buffers[t]) preamble += this.sseChunk(t, ev.json);
     writer.write(this.encoder.encode(preamble)).catch(() => this.dropViewer(writer));

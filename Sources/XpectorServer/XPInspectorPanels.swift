@@ -142,7 +142,7 @@ let xpInspectorTimeFormatter: DateFormatter = {
 
 // MARK: - Tabbed root (Logs + Network only)
 
-public enum XPInspectorTab: String { case network, logs }
+public enum XPInspectorTab: String { case network, sockets, logs }
 
 struct XPInspectorRoot: View {
     let onClose: () -> Void
@@ -157,6 +157,8 @@ struct XPInspectorRoot: View {
         TabView(selection: $selection) {
             XPNetworkInspectorView(onClose: onClose)
                 .tabItem { Label("Network", systemImage: "network") }.tag(XPInspectorTab.network)
+            XPWebSocketInspectorView(onClose: onClose)
+                .tabItem { Label("Sockets", systemImage: "bolt.horizontal") }.tag(XPInspectorTab.sockets)
             XPLogsView(onClose: onClose)
                 .tabItem { Label("Logs", systemImage: "text.alignleft") }.tag(XPInspectorTab.logs)
         }
