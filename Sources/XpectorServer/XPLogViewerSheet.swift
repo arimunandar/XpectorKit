@@ -44,6 +44,7 @@ struct XPLogViewerSheetView: View {
     private let subhead: String
     private let onGenerateCloud: ((@escaping (URL?) -> Void) -> Void)?
     private let onRegenerateCloud: ((@escaping (URL?) -> Void) -> Void)?
+    private let onOpenInspector: (() -> Void)?
     private let onClose: () -> Void
 
     @State private var selected = 0
@@ -63,6 +64,7 @@ struct XPLogViewerSheetView: View {
         subhead: String = "Live logs · network · layers",
         onGenerateCloud: ((@escaping (URL?) -> Void) -> Void)? = nil,
         onRegenerateCloud: ((@escaping (URL?) -> Void) -> Void)? = nil,
+        onOpenInspector: (() -> Void)? = nil,
         onClose: @escaping () -> Void
     ) {
         _destinations = State(initialValue: destinations)
@@ -70,6 +72,7 @@ struct XPLogViewerSheetView: View {
         self.subhead = subhead
         self.onGenerateCloud = onGenerateCloud
         self.onRegenerateCloud = onRegenerateCloud
+        self.onOpenInspector = onOpenInspector
         self.onClose = onClose
     }
 
@@ -87,6 +90,7 @@ struct XPLogViewerSheetView: View {
                     if dest.url != nil { urlCard }
                     actions
                     hint
+                    if let onOpenInspector { inspectorButton(onOpenInspector) }
                 }
                 .padding(22)
                 .frame(maxWidth: 520)
@@ -260,6 +264,27 @@ struct XPLogViewerSheetView: View {
             .padding(.top, 2)
     }
 
+    /// Opens the native on-device inspector (Logs · Network). Sits below a
+    /// hairline divider so it reads as a separate, secondary action.
+    private func inspectorButton(_ action: @escaping () -> Void) -> some View {
+        VStack(spacing: 14) {
+            Rectangle().fill(XPTheme.line).frame(height: 1)
+            Button(action: action) {
+                Label("Open on-device Inspector", systemImage: "ladybug")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(XPTheme.txt)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 13)
+                    .background(XPTheme.surfaceHi)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            Text("Logs · Network — captured on this device.")
+                .font(.caption2)
+                .foregroundColor(XPTheme.txt3)
+        }
+        .padding(.top, 4)
+    }
+
     /// Renders the current destination's QR off the main thread, showing a
     /// spinner while it's in flight. No-ops if the cached image already matches.
     private func regenerateQR() {
@@ -412,12 +437,25 @@ public extension XpectorServer {
             if top is UIHostingController<XPLogViewerSheetView> { return }
 
             let dismisser = XPLogViewerDismisser()
+            // Open the native inspector: fully dismiss this sheet FIRST, then
+            // present from the dismiss completion. Presenting over a sheet that's
+            // still animating out is silently refused by UIKit, so we wait for
+            // the completion instead of guessing a delay.
+            let openInspector: () -> Void = { [weak self] in
+                guard let self else { return }
+                if let host = dismisser.host {
+                    host.dismiss(animated: true) { self.presentInspector() }
+                } else {
+                    self.presentInspector()
+                }
+            }
             let host = UIHostingController(
                 rootView: XPLogViewerSheetView(
                     destinations: destinations,
                     subhead: subhead,
                     onGenerateCloud: generate,
                     onRegenerateCloud: regenerate,
+                    onOpenInspector: openInspector,
                     onClose: { dismisser.dismiss() }
                 )
             )

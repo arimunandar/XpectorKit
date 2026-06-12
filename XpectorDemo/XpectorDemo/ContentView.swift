@@ -22,6 +22,15 @@ struct ContentView: View {
                     }
                 }
 
+                Section("On-Device Inspector") {
+                    Button("Open Inspector (Logs · Network)") {
+                        XpectorServer.shared.presentInspector()
+                    }
+                    Button("Open Network tab") {
+                        XpectorServer.shared.presentNetworkInspector()
+                    }
+                }
+
                 Section("Navigation Demo") {
                     NavigationLink("Push Detail Screen") {
                         DetailDemoView(depth: 1)

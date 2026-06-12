@@ -257,6 +257,30 @@ tenant isolation) is in [`cloud/README.md`](cloud/README.md).
 > isolated. Still, a cloud link is more exposed than a LAN socket — only generate
 > one when you mean to share.
 
+## On-device inspector (Logs · Network)
+
+Sometimes you want to inspect **on the device itself** — no second screen, no
+browser, no network. Xpector ships a native, in-app inspector with **Logs** and
+**Network** tabs (a Wormholy-style request list with a Postman-style detail view:
+headers, request/response bodies, syntax-highlighted JSON, and copy-as-cURL). It
+reads the raw capture buffers, so you see full-fidelity traffic for your own app
+— nothing leaves the device.
+
+```swift
+XpectorServer.shared.presentInspector()           // opens to Network (Logs tab alongside)
+XpectorServer.shared.presentInspector(initialTab: .logs)
+XpectorServer.shared.presentNetworkInspector()     // straight to Network
+```
+
+- **From the connect sheet:** `presentLogViewer()` includes an **"Open on-device
+  Inspector"** button at the bottom, so you can jump straight in.
+- **Shake to open:** `XpectorServer.shared.enableShakeToInspect()` — shaking the
+  device presents the inspector from anywhere.
+
+Presenting starts network capture if it isn't already running. The inspector is
+scoped to **Logs + Network**; the [browser viewer](#watch-everything-in-any-browser-same-wifi)
+covers the richer tabs (Layers, Flow, Leaks, Current).
+
 ## Enabling in non-Release configurations
 
 The Quick Start uses `#if DEBUG`, which covers the stock *Debug* config. Many
