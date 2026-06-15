@@ -837,7 +837,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         background: #0f1217; padding: 6px 0; font-size: 12px;
       }
       /* A draggable divider to resize the hierarchy panel / network list. */
-      .layers-resizer, .net-resizer { flex: 0 0 5px; cursor: col-resize; background: #23272e; touch-action: none; user-select: none; -webkit-user-select: none; }
+      .layers-resizer, .net-resizer { flex: 0 0 5px; cursor: col-resize; background: #23272e; }
       .layers-resizer:hover, .layers-resizer.drag,
       .net-resizer:hover, .net-resizer.drag { background: #3a6fae; }
       /* Rows size to their content (indent + name) and the panel scrolls
@@ -1952,63 +1952,43 @@ final class XPHttpLogServer: @unchecked Sendable {
       };
       document.getElementById('layersRefresh').onclick = () => loadLayers(true);
       layersLiveEl.onchange = () => { if (activeView === 'layers') startLayersLive(); };
-      // Resize the hierarchy panel by dragging the divider. Track move/up on
-      // window rather than via setPointerCapture on the 5px strip: WebKit
-      // (Safari + the WKWebView the LAN viewer runs in) routes captured mouse
-      // moves unreliably, so a drag that left the strip silently stalled — the
-      // resizer looked dead. Window listeners catch every move regardless.
+      // Resize the hierarchy panel by dragging the divider.
       const layersResizerEl = document.getElementById('layersResizer');
       let rzDown = null;
       layersResizerEl.addEventListener('pointerdown', (e) => {
         rzDown = { x: e.clientX, w: layersTreeEl.offsetWidth };
         layersResizerEl.classList.add('drag');
-        document.body.style.cursor = 'col-resize';
+        layersResizerEl.setPointerCapture(e.pointerId);
         e.preventDefault();
       });
-      window.addEventListener('pointermove', (e) => {
+      layersResizerEl.addEventListener('pointermove', (e) => {
         if (!rzDown) return;
         const w = Math.max(140, Math.min(640, rzDown.w + (e.clientX - rzDown.x)));
         layersTreeEl.style.flexBasis = w + 'px';
-        e.preventDefault();
       });
-      function endRz() {
-        if (!rzDown) return;
-        rzDown = null;
-        layersResizerEl.classList.remove('drag');
-        document.body.style.cursor = '';
-      }
-      window.addEventListener('pointerup', endRz);
-      window.addEventListener('pointercancel', endRz);
+      function endRz() { rzDown = null; layersResizerEl.classList.remove('drag'); }
+      layersResizerEl.addEventListener('pointerup', endRz);
+      layersResizerEl.addEventListener('pointercancel', endRz);
 
-      // Resize the network request list by dragging the divider. Track move/up
-      // on window rather than via setPointerCapture on the 5px strip: WebKit
-      // (Safari + the WKWebView the LAN viewer runs in) routes captured mouse
-      // moves unreliably, so a drag that left the strip silently stalled — the
-      // resizer looked dead. Window listeners catch every move regardless.
+      // Resize the network request list by dragging the divider.
       const netResizerEl = document.getElementById('netResizer');
       let netRzDown = null;
       netResizerEl.addEventListener('pointerdown', (e) => {
         netRzDown = { x: e.clientX, w: netListEl.offsetWidth };
         netResizerEl.classList.add('drag');
-        document.body.style.cursor = 'col-resize';
+        netResizerEl.setPointerCapture(e.pointerId);
         e.preventDefault();
       });
-      window.addEventListener('pointermove', (e) => {
+      netResizerEl.addEventListener('pointermove', (e) => {
         if (!netRzDown) return;
         const max = Math.max(260, document.getElementById('net').offsetWidth - 360);
         const w = Math.max(200, Math.min(max, netRzDown.w + (e.clientX - netRzDown.x)));
         netListEl.style.flex = '0 0 ' + w + 'px';
         netListEl.style.maxWidth = 'none';
-        e.preventDefault();
       });
-      function endNetRz() {
-        if (!netRzDown) return;
-        netRzDown = null;
-        netResizerEl.classList.remove('drag');
-        document.body.style.cursor = '';
-      }
-      window.addEventListener('pointerup', endNetRz);
-      window.addEventListener('pointercancel', endNetRz);
+      function endNetRz() { netRzDown = null; netResizerEl.classList.remove('drag'); }
+      netResizerEl.addEventListener('pointerup', endNetRz);
+      netResizerEl.addEventListener('pointercancel', endNetRz);
 
       // ---- sockets (websocket connections + message timeline) ----
       const wsListEl = document.getElementById('wsList');
