@@ -773,6 +773,15 @@
     const q = String.fromCharCode(39), bs = String.fromCharCode(92);
     return q + s.split(q).join(q + bs + q + q) + q;   // wrap in '…', escaping any '
   }
+  function parseMultipartFields(body, boundary) {
+    const fields = [];
+    const parts = body.split('--' + boundary);
+    for (const part of parts) {
+      const m = part.match(/Content-Disposition:\s*form-data;\s*name="([^"]+)"\r?\n\r?\n([\s\S]*?)(?:\r?\n)?$/);
+      if (m) fields.push({ name: m[1], value: m[2].trimEnd() });
+    }
+    return fields;
+  }
   function buildCurl(net) {
     const parts = ['curl -sS'];
     const m = (net.method || 'GET').toUpperCase();
@@ -780,9 +789,21 @@
     parts.push(shellEscape(net.url));
     const skip = { 'accept-encoding': 1, 'accept-language': 1, 'connection': 1, 'host': 1, 'content-length': 1 };
     const h = net.requestHeaders || {};
-    for (const k in h) { if (!skip[k.toLowerCase()]) parts.push('-H ' + shellEscape(k + ': ' + h[k])); }
-    if (net.requestBodyPreview) parts.push('--data ' + shellEscape(net.requestBodyPreview));
-    return parts.join(' ');
+    const ct = Object.keys(h).find(k => k.toLowerCase() === 'content-type');
+    const ctVal = ct ? h[ct] : '';
+    const boundaryMatch = ctVal.match(/^multipart\/form-data;\s*boundary=(.+)/i);
+    for (const k in h) {
+      if (skip[k.toLowerCase()]) continue;
+      if (boundaryMatch && k.toLowerCase() === 'content-type') continue;
+      parts.push('-H ' + shellEscape(k + ': ' + h[k]));
+    }
+    if (boundaryMatch && net.requestBodyPreview) {
+      const fields = parseMultipartFields(net.requestBodyPreview, boundaryMatch[1]);
+      for (const f of fields) parts.push('-F ' + shellEscape(f.name + '=' + f.value));
+    } else if (net.requestBodyPreview) {
+      parts.push('--data ' + shellEscape(net.requestBodyPreview));
+    }
+    return parts.join(' \\\n    ');
   }
 
   // ---- logs ----

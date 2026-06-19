@@ -417,18 +417,51 @@ private enum XPInspectorJSON {
 
 // MARK: - cURL
 
+private func parseMultipartFields(_ body: String, boundary: String) -> [(name: String, value: String)] {
+    var fields: [(name: String, value: String)] = []
+    let parts = body.components(separatedBy: "--" + boundary)
+    let pattern = try! NSRegularExpression(
+        pattern: #"Content-Disposition:\s*form-data;\s*name="([^"]+)"\r?\n\r?\n([\s\S]*?)$"#)
+    for part in parts {
+        let range = NSRange(part.startIndex..., in: part)
+        if let m = pattern.firstMatch(in: part, range: range),
+           let nameRange = Range(m.range(at: 1), in: part),
+           let valRange = Range(m.range(at: 2), in: part) {
+            fields.append((
+                name: String(part[nameRange]),
+                value: String(part[valRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            ))
+        }
+    }
+    return fields
+}
+
 private func buildCurl(_ e: XPNetworkEntry) -> String {
     var parts = ["curl -sS"]
     if e.method.uppercased() != "GET" { parts.append("-X \(e.method.uppercased())") }
     parts.append(xpShellEscape(e.url))
     let skip: Set<String> = ["accept-encoding", "accept-language", "connection", "host", "content-length"]
+    let ctEntry = e.requestHeaders.first { $0.key.lowercased() == "content-type" }
+    let ctVal = ctEntry?.value ?? ""
+    let isMultipart = ctVal.lowercased().hasPrefix("multipart/form-data")
+    let boundary: String? = {
+        guard isMultipart,
+              let range = ctVal.range(of: "boundary=", options: .caseInsensitive)
+        else { return nil }
+        return String(ctVal[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+    }()
     for (k, v) in e.requestHeaders where !skip.contains(k.lowercased()) {
+        if boundary != nil && k.lowercased() == "content-type" { continue }
         parts.append("-H \(xpShellEscape("\(k): \(v)"))")
     }
-    if let b = e.requestBodyPreview, !b.isEmpty {
+    if let boundary, let b = e.requestBodyPreview, !b.isEmpty {
+        for f in parseMultipartFields(b, boundary: boundary) {
+            parts.append("-F \(xpShellEscape("\(f.name)=\(f.value)"))")
+        }
+    } else if let b = e.requestBodyPreview, !b.isEmpty {
         parts.append("-d \(xpShellEscape(b))")
     }
-    return parts.joined(separator: " \\\n  ")
+    return parts.joined(separator: " \\\n    ")
 }
 
 private func xpShellEscape(_ s: String) -> String {
