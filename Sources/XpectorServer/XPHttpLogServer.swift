@@ -578,6 +578,8 @@ final class XPHttpLogServer: @unchecked Sendable {
       .status.live::before { color: #3ddc84; }
       .status.down { color: #f0a59e; background: rgba(229,83,75,.1); border-color: rgba(229,83,75,.25); }
       .status.down::before { color: #e5534b; }
+      .status.paused { color: #f5c451; background: rgba(245,196,81,.1); border-color: rgba(245,196,81,.25); }
+      .status.paused::before { color: #f5c451; }
       .spacer { flex: 1 1 auto; }
       .controls { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
       header input[type=text] {
@@ -1049,6 +1051,7 @@ final class XPHttpLogServer: @unchecked Sendable {
           <span class="spacer"></span>
           <div class="controls">
             <input id="filter" type="text" placeholder="filter logs…" autocomplete="off" spellcheck="false">
+            <button class="act act-icon" id="streamToggle" title="Pause streaming" aria-label="Pause streaming"><svg id="streamIcon" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg></button>
             <button class="act act-icon" id="clear" title="Clear" aria-label="Clear"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3"/></svg></button>
           </div>
         </div>
@@ -1136,6 +1139,7 @@ final class XPHttpLogServer: @unchecked Sendable {
       let baseFilter = '';        // selected host, or '' for all
       const hosts = new Set();    // distinct hosts seen, for the dropdown
       let activeView = 'logs';
+      let streaming = true;
       const nets = {};            // id -> entry
       let netCount = 0;
       let leakCount = 0;
@@ -1179,6 +1183,21 @@ final class XPHttpLogServer: @unchecked Sendable {
         applyFilter();
       }
       for (const [tabId, val] of TABS) document.getElementById(tabId).onclick = () => setView(val);
+
+      // ---- stream toggle ----
+      const streamToggleEl = document.getElementById('streamToggle');
+      const streamIconEl = document.getElementById('streamIcon');
+      function setStreaming(on) {
+        streaming = on;
+        streamToggleEl.title = on ? 'Pause streaming' : 'Resume streaming';
+        streamToggleEl.setAttribute('aria-label', streamToggleEl.title);
+        streamIconEl.innerHTML = on
+          ? '<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>'
+          : '<path d="M6 4l14 8-14 8z"/>';
+        if (!on) { statusEl.className = 'status paused'; statusEl.textContent = 'paused'; }
+        else { statusEl.className = 'status live'; statusEl.textContent = 'live'; }
+      }
+      streamToggleEl.onclick = () => setStreaming(!streaming);
 
       // ---- helpers ----
       function pad(n) { return String(n).padStart(2, '0'); }
@@ -2261,16 +2280,15 @@ final class XPHttpLogServer: @unchecked Sendable {
 
       // ---- stream ----
       const es = new EventSource('/stream');
-      es.onopen = () => { statusEl.className = 'status live'; statusEl.textContent = 'live'; };
+      es.onopen = () => { if (streaming) { statusEl.className = 'status live'; statusEl.textContent = 'live'; } };
       es.onerror = () => { statusEl.className = 'status down'; statusEl.textContent = 'reconnecting…'; };
-      es.onmessage = (e) => { try { appendLog(JSON.parse(e.data)); } catch (_) {} };
-      es.addEventListener('net', (e) => { try { addNet(JSON.parse(e.data)); } catch (_) {} });
-      es.addEventListener('ws', (e) => { try { addWS(JSON.parse(e.data)); } catch (_) {} });
-      es.addEventListener('leak', (e) => { try { addLeak(JSON.parse(e.data)); } catch (_) {} });
+      es.onmessage = (e) => { if (!streaming) return; try { appendLog(JSON.parse(e.data)); } catch (_) {} };
+      es.addEventListener('net', (e) => { if (!streaming) return; try { addNet(JSON.parse(e.data)); } catch (_) {} });
+      es.addEventListener('ws', (e) => { if (!streaming) return; try { addWS(JSON.parse(e.data)); } catch (_) {} });
+      es.addEventListener('leak', (e) => { if (!streaming) return; try { addLeak(JSON.parse(e.data)); } catch (_) {} });
       es.addEventListener('nav', (e) => {
+        if (!streaming) return;
         try { addNav(JSON.parse(e.data)); } catch (_) {}
-        // A navigation is an unambiguous screen change — refresh the layers
-        // promptly (after the transition settles) when the tab is live.
         if (activeView === 'layers' && layersLiveEl.checked) setTimeout(refreshLayersLive, 350);
       });
       setView('logs');

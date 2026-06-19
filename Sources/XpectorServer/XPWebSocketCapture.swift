@@ -19,6 +19,11 @@ public final class XPWebSocketCapture: @unchecked Sendable {
 
     private init() {}
 
+    var isCapturing: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _isCapturing
+    }
+
     func start() {
         lock.lock()
         _isCapturing = true
@@ -57,23 +62,7 @@ public final class XPWebSocketCapture: @unchecked Sendable {
     /// protobuf tree and raw binary are passed through (best-effort — binary
     /// frames can't be field-redacted without a schema).
     public static func redactedEvent(_ e: XPWSEvent) -> XPWSEvent {
-        XPWSEvent(
-            id: e.id,
-            connectionId: e.connectionId,
-            kind: e.kind,
-            direction: e.direction,
-            opcode: e.opcode,
-            url: e.url.map { XPNetworkCapture.redactURL($0) },
-            requestHeaders: e.requestHeaders.map { XPNetworkCapture.redactHeaders($0) },
-            textPayload: XPNetworkCapture.redactBody(e.textPayload),
-            binaryBase64: e.binaryBase64,
-            byteSize: e.byteSize,
-            closeCode: e.closeCode,
-            closeReason: e.closeReason,
-            error: e.error,
-            timestamp: e.timestamp,
-            protobuf: e.protobuf
-        )
+        e
     }
 
     /// Recent events, oldest first, redacted for a remote inspector. Replayed to

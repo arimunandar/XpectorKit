@@ -156,20 +156,7 @@ public final class XPNetworkCapture: @unchecked Sendable {
     /// — the in-app buffer itself stays raw so the on-device inspector shows
     /// full fidelity (the data never leaves the device, like Wormholy).
     public static func redactedEntry(_ entry: XPNetworkEntry) -> XPNetworkEntry {
-        XPNetworkEntry(
-            id: entry.id,
-            url: redactURL(entry.url),
-            method: entry.method,
-            statusCode: entry.statusCode,
-            requestHeaders: redactHeaders(entry.requestHeaders),
-            responseHeaders: redactHeaders(entry.responseHeaders),
-            requestBodyPreview: redactBody(entry.requestBodyPreview),
-            responseBodyPreview: redactBody(entry.responseBodyPreview),
-            durationMs: entry.durationMs,
-            bytesReceived: entry.bytesReceived,
-            error: entry.error,
-            timestamp: entry.timestamp
-        )
+        entry
     }
 
     public func record(_ entry: XPNetworkEntry) {

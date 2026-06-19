@@ -27,10 +27,12 @@ struct XPWSConnection: Identifiable {
 
 final class XPWebSocketInspectorStore: ObservableObject {
     @Published private(set) var connections: [XPWSConnection] = []   // newest first
+    @Published private(set) var capturing: Bool
     private var index: [String: Int] = [:]
     private var observerID: UUID?
 
     init() {
+        capturing = XPWebSocketCapture.shared.isCapturing
         for event in XPWebSocketCapture.shared.liveEvents() { apply(event) }
         observerID = XPWebSocketCapture.shared.addObserver { [weak self] event in
             DispatchQueue.main.async { self?.apply(event) }
@@ -76,6 +78,15 @@ final class XPWebSocketInspectorStore: ObservableObject {
         index = [:]
     }
 
+    func toggleCapture() {
+        if capturing {
+            XPWebSocketCapture.shared.stop()
+        } else {
+            XPWebSocketCapture.shared.start()
+        }
+        capturing = XPWebSocketCapture.shared.isCapturing
+    }
+
     func connection(_ id: String) -> XPWSConnection? {
         index[id].map { connections[$0] }
     }
@@ -95,8 +106,20 @@ struct XPWebSocketInspectorView: View {
 
     var body: some View {
         XPPanelScaffold(title: "Sockets", onClear: { store.clear() }, onClose: onClose) {
-            XPSearchField(placeholder: "Filter by URL", text: $search)
-                .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 8)
+            HStack(spacing: 8) {
+                XPSearchField(placeholder: "Filter by URL", text: $search)
+                Button { store.toggleCapture() } label: {
+                    Image(systemName: store.capturing ? "pause.fill" : "play.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(store.capturing ? XPTheme.orange : XPTheme.accent)
+                        .frame(width: 36, height: 36)
+                        .background(XPTheme.surface)
+                        .clipShape(Circle())
+                        .overlay(Circle().stroke(XPTheme.line, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 8)
             if filtered.isEmpty {
                 XPEmptyState(icon: "bolt.horizontal", text: store.connections.isEmpty ? "No socket connections yet" : "No matches")
             } else {
