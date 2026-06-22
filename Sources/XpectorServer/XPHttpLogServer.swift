@@ -1323,7 +1323,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         const fields = [];
         const parts = body.split('--' + boundary);
         for (const part of parts) {
-          const m = part.match(/Content-Disposition:\s*form-data;\s*name="([^"]+)"\r?\n\r?\n([\s\S]*?)(?:\r?\n)?$/);
+          const m = part.match(/Content-Disposition:\\s*form-data;\\s*name="([^"]+)"\\r?\\n\\r?\\n([\\s\\S]*?)(?:\\r?\\n)?$/);
           if (m) fields.push({ name: m[1], value: m[2].trimEnd() });
         }
         return fields;
@@ -1337,7 +1337,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         const h = net.requestHeaders || {};
         const ct = Object.keys(h).find(k => k.toLowerCase() === 'content-type');
         const ctVal = ct ? h[ct] : '';
-        const boundaryMatch = ctVal.match(/^multipart\/form-data;\s*boundary=(.+)/i);
+        const boundaryMatch = ctVal.match(/^multipart\\/form-data;\\s*boundary=(.+)/i);
         for (const k in h) {
           if (skip[k.toLowerCase()]) continue;
           if (boundaryMatch && k.toLowerCase() === 'content-type') continue;
