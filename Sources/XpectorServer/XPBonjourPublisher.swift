@@ -5,6 +5,9 @@ final class XPBonjourPublisher: NSObject, @unchecked Sendable {
     private var netService: NetService?
     private let port: UInt16
     private let bundleID: String
+    private var retryCount = 0
+    private static let maxRetries = 3
+    private var stopped = false
 
     init(port: UInt16) {
         self.port = port
@@ -13,7 +16,28 @@ final class XPBonjourPublisher: NSObject, @unchecked Sendable {
     }
 
     func start() {
+        stopped = false
+        retryCount = 0
+        publish()
+    }
+
+    func stop() {
+        stopped = true
         DispatchQueue.main.async { [self] in
+            netService?.stop()
+            netService?.remove(from: .main, forMode: .common)
+            netService?.delegate = nil
+            netService = nil
+        }
+    }
+
+    private func publish() {
+        DispatchQueue.main.async { [self] in
+            guard !stopped else { return }
+            netService?.stop()
+            netService?.remove(from: .main, forMode: .common)
+            netService?.delegate = nil
+
             let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Xpector"
             let deviceName = UIDevice.current.name
             let service = NetService(
@@ -28,24 +52,30 @@ final class XPBonjourPublisher: NSObject, @unchecked Sendable {
             netService = service
         }
     }
-
-    func stop() {
-        // The service was scheduled on the main run loop in start(); tear it down
-        // there too, fully unscheduling and clearing the delegate.
-        DispatchQueue.main.async { [self] in
-            netService?.stop()
-            netService?.remove(from: .main, forMode: .common)
-            netService?.delegate = nil
-            netService = nil
-        }
-    }
 }
 
 extension XPBonjourPublisher: NetServiceDelegate {
     func netServiceDidPublish(_ sender: NetService) {
+        retryCount = 0
         print("[Xpector] Bonjour service published: \(sender.name) on port \(sender.port)")
     }
+
     func netService(_ sender: NetService, didNotPublish errorDict: [String: NSNumber]) {
-        print("[Xpector] Bonjour publish failed: \(errorDict)")
+        #if targetEnvironment(simulator)
+        // Bonjour publishing of custom service types is unreliable in the
+        // Simulator — don't retry or warn, it's a known platform limitation.
+        return
+        #else
+        guard !stopped else { return }
+        retryCount += 1
+        if retryCount <= Self.maxRetries {
+            let delay = Double(retryCount) * 2.0
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.publish()
+            }
+        } else {
+            print("[Xpector] Bonjour publish failed after \(Self.maxRetries) retries (error \(errorDict["NSNetServicesErrorCode"] ?? -1)). WiFi auto-discovery won't work — clients can still connect by IP.")
+        }
+        #endif
     }
 }
