@@ -5,11 +5,11 @@ let package = Package(
     name: "XpectorKit",
     platforms: [
         .macOS(.v14),
-        .iOS(.v15)
+        .iOS(.v15),
     ],
     products: [
-        .library(name: "XpectorKit", targets: ["XpectorKit"]),
-        .library(name: "XpectorServer", targets: ["XpectorServer"]),
+        .library(name: "XpectorKit", type: .dynamic, targets: ["XpectorKit"]),
+        .library(name: "XpectorServer", type: .dynamic, targets: ["XpectorServer"]),
     ],
     targets: [
         .target(
@@ -17,7 +17,7 @@ let package = Package(
             path: "Sources/Peertalk",
             publicHeadersPath: "include",
             cSettings: [
-                .define("SHOULD_COMPILE_LOOKIN_SERVER", to: "1")
+                .define("SHOULD_COMPILE_LOOKIN_SERVER", to: "1"),
             ]
         ),
         .target(
