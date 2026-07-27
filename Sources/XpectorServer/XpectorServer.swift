@@ -200,7 +200,7 @@ public final class XpectorServer: @unchecked Sendable {
         didSendWelcome = false
         firstPeerLock.unlock()
 
-        let conn = XPServerConnection(port: selectedPort)
+        let conn = XPServerConnection(port: selectedPort, allowPortFallback: config.allowPortFallback)
         conn.onConnected = { [weak self] in
             guard let self else { return }
             // Multiple peers (Mac app, CLI, transient scans) connect over the

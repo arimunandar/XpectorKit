@@ -27,6 +27,11 @@ Opt-outs and overrides:
 
 - Set `XPECTOR_DISABLED=1` in your scheme's environment variables to skip
   auto-start entirely.
+- Set `XPECTOR_PORT=<n>` to move the server off the default `47164` (the WiFi
+  and log-viewer ports follow at `n + 100` / `n + 101`).
+- Set `XPECTOR_PORT_FALLBACK=1` to let the Simulator pick another free port when
+  the configured one is busy — only needed when you run two instrumented apps
+  side by side, and it makes the port (and the viewer URL) vary per launch.
 - Call `XpectorServer.shared.start(config:)` yourself to use a custom
   configuration — a manual start always wins over auto-start (before
   auto-start fires it becomes a no-op; after, the server restarts with your
@@ -145,9 +150,9 @@ tab with a **Generate** button — see [Cloud relay](#cloud-relay--watch-from-an
 
 ### Ports & opt-out
 
-- **Port** is derived automatically: `inspection port + 101` (e.g. `47265`).
-  If the base port is taken it shifts up — `logViewerURL()` always reports the
-  real one.
+- **Port** is derived automatically: `inspection port + 101` (e.g. `47265`), so
+  it is stable across runs. It only shifts if you opt into `allowPortFallback`
+  — `logViewerURL()` always reports the real one.
 - **Opt out:** set `enableLocalLogStream = false` on your `XPConfiguration`, or
   set `XPECTOR_LOG_STREAM_DISABLED=1` in the scheme environment to keep
   auto-start but not open the HTTP port.
@@ -494,7 +499,8 @@ Customize what gets captured:
 
 ```swift
 var config = XPConfiguration()
-config.port = 47164                           // default
+config.port = 47164                           // default — fixed, same every run
+config.allowPortFallback = false              // true: Simulator may pick another free port
 config.enableNetworkCapture = true            // HTTP tracking
 config.enableAutomaticNetworkInterception = true  // URLSession swizzle
 config.enableWebSocketCapture = true          // WebSocket + protobuf (DEBUG; needs network capture)
@@ -529,10 +535,14 @@ iOS App                          Mac
 **Connection paths:**
 - **USB** — Peertalk over usbmuxd. Fastest, zero config.
 - **WiFi** — Plain TCP server on the same network. Discovered via Bonjour or `devicectl`.
-- **Simulator** — Peertalk over localhost TCP. Automatically resolves port conflicts.
+- **Simulator** — Peertalk over localhost TCP on the same fixed port every run.
 
 **Ports:**
-- Simulator: 47164–47169 (auto-selects first available)
+- Peertalk: 47164 (fixed; `XPECTOR_PORT` / `config.port` to change). If it's
+  momentarily held by a previous instance the server retries the same port
+  rather than moving, so the URLs stay put. Set `allowPortFallback` (or
+  `XPECTOR_PORT_FALLBACK=1`) to scan 47164–47169 instead — needed only for two
+  instrumented apps running at once on the Simulator.
 - WiFi server: Peertalk port + 100
 - LAN log-stream HTTP server: Peertalk port + 101
 

@@ -10,6 +10,9 @@ final class XPServerConnection: @unchecked Sendable {
 
     private let transport = XPTransportChannel()
     private let preferredPort: UInt16
+    /// When false (the default), the Simulator stays pinned to `preferredPort`
+    /// instead of scanning the range — see `XPConfiguration.allowPortFallback`.
+    private let allowPortFallback: Bool
     private(set) var actualPort: UInt16 = 0
     private var isStarted = false
 
@@ -18,8 +21,9 @@ final class XPServerConnection: @unchecked Sendable {
     /// handlers produce their results. Serial, so responses keep their order.
     private let responseQueue = DispatchQueue(label: "com.xpector.response", qos: .userInitiated)
 
-    init(port: UInt16) {
+    init(port: UInt16, allowPortFallback: Bool = false) {
         self.preferredPort = port
+        self.allowPortFallback = allowPortFallback
     }
 
     var hasConnectedPeer: Bool { transport.isConnected }
@@ -28,18 +32,28 @@ final class XPServerConnection: @unchecked Sendable {
         guard !isStarted else { return }
         isStarted = true
         transport.delegate = self
-        #if targetEnvironment(simulator)
-        actualPort = transport.listenOnAvailablePort(
-            preferred: preferredPort,
-            range: XPConstants.simulatorPortRange
-        )
-        #else
-        transport.listen(onPort: preferredPort)
-        actualPort = preferredPort
-        #endif
+        beginListening()
         if actualPort > 0 {
             print("[Xpector] Listening on port \(actualPort)")
         }
+    }
+
+    /// Binds the listener. Pinned to `preferredPort` unless the host opted into
+    /// `allowPortFallback` on the Simulator — a stable port keeps the derived
+    /// WiFi/HTTP ports (and so the log-viewer URL) identical across runs. A bind
+    /// failure surfaces via the delegate, which retries on the same port.
+    private func beginListening() {
+        #if targetEnvironment(simulator)
+        if allowPortFallback {
+            actualPort = transport.listenOnAvailablePort(
+                preferred: preferredPort,
+                range: XPConstants.simulatorPortRange
+            )
+            return
+        }
+        #endif
+        transport.listen(onPort: preferredPort)
+        actualPort = preferredPort
     }
 
     func stop() {
@@ -258,14 +272,7 @@ extension XPServerConnection: XPTransportDelegate {
     func transport(_ transport: XPTransportChannel, didFailWithError error: Error) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self, self.isStarted else { return }
-            #if targetEnvironment(simulator)
-            self.actualPort = self.transport.listenOnAvailablePort(
-                preferred: self.preferredPort,
-                range: XPConstants.simulatorPortRange
-            )
-            #else
-            self.transport.listen(onPort: self.preferredPort)
-            #endif
+            self.beginListening()
         }
     }
 }

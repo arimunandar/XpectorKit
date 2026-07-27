@@ -24,10 +24,14 @@ targets:
     sources:
       - XpectorDemo
     dependencies:
+      # XpectorServer only. Both products are dynamic (see Package.swift), and
+      # listing XpectorKit here as well makes Xcode try to link the XpectorKit
+      # *target* statically into two places at once — which it refuses to do
+      # while a dynamic product of the same name exists ("linked as a static
+      # library by 'XpectorDemo' and 'XpectorKit'"). XpectorServer already
+      # depends on XpectorKit, so `import XpectorKit` still resolves.
       - package: XpectorKit
         product: XpectorServer
-      - package: XpectorKit
-        product: XpectorKit
     info:
       path: XpectorDemo/Info.plist
       properties:
@@ -59,3 +63,22 @@ targets:
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: XPECTOR_ENABLED
         Release:
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: ""
+
+# The generated .xcodeproj is gitignored, so without a scheme declared here a
+# fresh `xcodegen generate` leaves nothing for `xcodebuild -scheme` to build
+# (it previously relied on Xcode auto-creating a user scheme on first open).
+schemes:
+  XpectorDemo:
+    build:
+      targets:
+        XpectorDemo: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+    profile:
+      config: Staging
+    analyze:
+      config: Debug
+    archive:
+      config: Release

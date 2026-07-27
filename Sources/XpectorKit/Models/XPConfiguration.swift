@@ -2,6 +2,19 @@ import Foundation
 
 public struct XPConfiguration: Sendable {
     public var port: UInt16
+    /// Lets the Simulator fall back to the next free port in
+    /// `XPConstants.simulatorPortRange` when `port` is already bound, instead of
+    /// staying pinned to `port`.
+    ///
+    /// **Off by default** so every run lands on the same port — and therefore the
+    /// same WiFi port (`port + 100`) and the same log-viewer URL (`port + 101`),
+    /// which a scanning fallback would shift on each launch. A pinned port that
+    /// is genuinely occupied (a lingering previous instance) simply retries until
+    /// it frees up.
+    ///
+    /// Turn this on only when you deliberately run **two or more instrumented
+    /// apps at once** on the Simulator, where they must not fight over one port.
+    public var allowPortFallback: Bool
     public var enableNetworkCapture: Bool
     public var enableAutomaticNetworkInterception: Bool
     /// Auto-captures `URLSessionWebSocketTask` connections + messages (the new
@@ -36,6 +49,7 @@ public struct XPConfiguration: Sendable {
 
     public init(
         port: UInt16 = 47164,
+        allowPortFallback: Bool = false,
         enableNetworkCapture: Bool = true,
         enableAutomaticNetworkInterception: Bool = true,
         enableWebSocketCapture: Bool = true,
@@ -55,6 +69,7 @@ public struct XPConfiguration: Sendable {
         leakCheckDelayMs: Int = 2000
     ) {
         self.port = port
+        self.allowPortFallback = allowPortFallback
         self.enableNetworkCapture = enableNetworkCapture
         self.enableAutomaticNetworkInterception = enableAutomaticNetworkInterception
         self.enableWebSocketCapture = enableWebSocketCapture

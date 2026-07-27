@@ -136,6 +136,12 @@ public final class XPTransportChannel: NSObject, @unchecked Sendable {
         guard fd >= 0 else { return false }
         defer { close(fd) }
 
+        // The real listener binds with SO_REUSEADDR, so the probe must too —
+        // otherwise a socket left in TIME_WAIT by the previous run reads as
+        // "taken" and the scan drifts to a different port on every launch.
+        var on: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
+
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = in_port_t(port).bigEndian
