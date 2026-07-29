@@ -144,6 +144,18 @@ struct ContentView: View {
                     }
                 }
 
+                Section("Failures") {
+                    Button("GET unreachable host") {
+                        fetchURL("https://127.0.0.1:9/nope")
+                    }
+                    Button("GET then cancel immediately") {
+                        cancelledRequest("https://httpbin.org/delay/10")
+                    }
+                    Button("GET with 1s timeout") {
+                        timingOutRequest("https://httpbin.org/delay/10")
+                    }
+                }
+
                 Section("WebSocket (auto-captured)") {
                     Button("Connect (ws://127.0.0.1:8080)") { wsDemo.connect() }
                     Button("Send text message") { wsDemo.sendText() }
@@ -321,6 +333,33 @@ struct ContentView: View {
                     let bytes = data?.count ?? 0
                     networkStatus = "\(http?.statusCode ?? 0) — \(bytes) bytes"
                 }
+            }
+        }.resume()
+    }
+
+    /// Fires a request and cancels it straight away — the case the URL loading
+    /// system tears down via `stopLoading`, which used to vanish from the list.
+    private func cancelledRequest(_ urlString: String) {
+        guard let url = URL(string: urlString) else { return }
+        networkStatus = "Cancelling..."
+        let task = monitoredSession.dataTask(with: url) { _, _, error in
+            DispatchQueue.main.async {
+                networkStatus = "Cancelled: \(error?.localizedDescription ?? "no error")"
+            }
+        }
+        task.resume()
+        task.cancel()
+    }
+
+    /// A request whose own timeout expires long before the server answers.
+    private func timingOutRequest(_ urlString: String) {
+        guard let url = URL(string: urlString) else { return }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 1
+        networkStatus = "Waiting for timeout..."
+        monitoredSession.dataTask(with: request) { _, _, error in
+            DispatchQueue.main.async {
+                networkStatus = "Timed out: \(error?.localizedDescription ?? "no error")"
             }
         }.resume()
     }

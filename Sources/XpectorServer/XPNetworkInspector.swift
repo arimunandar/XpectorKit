@@ -40,6 +40,22 @@ final class XPNetworkInspectorStore: ObservableObject {
     }
 }
 
+// MARK: - Status pill
+
+/// A failed request carries no status code, so a bare `statusCode` reads as an
+/// empty row. Surface it as `ERR` in red — the same treatment the web viewers
+/// give it — so a transport failure is never mistaken for a blank.
+private extension XPNetworkEntry {
+    var statusPillText: String {
+        if error != nil { return "ERR" }
+        return statusCode == 0 ? "—" : "\(statusCode)"
+    }
+
+    var statusPillColor: Color {
+        error != nil ? XPTheme.red : XPTheme.status(statusCode)
+    }
+}
+
 // MARK: - List
 
 struct XPNetworkInspectorView: View {
@@ -88,7 +104,7 @@ private struct XPNetworkRow: View {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(spacing: 6) {
-                        XPPill(text: entry.statusCode == 0 ? "—" : "\(entry.statusCode)", color: XPTheme.status(entry.statusCode))
+                        XPPill(text: entry.statusPillText, color: entry.statusPillColor)
                         XPPill(text: entry.method.uppercased(), color: XPTheme.method(entry.method))
                         Spacer(minLength: 4)
                         Text("\(Int(entry.durationMs))ms")
@@ -117,7 +133,7 @@ struct XPNetworkEntryDetail: View {
                 XPCard {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 7) {
-                            XPPill(text: entry.statusCode == 0 ? "—" : "\(entry.statusCode)", color: XPTheme.status(entry.statusCode))
+                            XPPill(text: entry.statusPillText, color: entry.statusPillColor)
                             XPPill(text: entry.method.uppercased(), color: XPTheme.method(entry.method))
                             Spacer()
                             Text("\(Int(entry.durationMs))ms · \(entry.bytesReceived) B")

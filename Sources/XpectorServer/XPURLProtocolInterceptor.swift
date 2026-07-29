@@ -10,6 +10,12 @@ final class XPURLProtocolInterceptor: URLProtocol, @unchecked Sendable {
     private var startTime: CFAbsoluteTime = 0
     private var capturedResponse: HTTPURLResponse?
 
+    /// Guards `recordEntry` so one load yields exactly one captured entry no
+    /// matter which terminal path runs first — the forwarding completion, an
+    /// early bail-out, or `stopLoading` when the load is torn down.
+    private let recordLock = NSLock()
+    private var didRecord = false
+
     private static let forwardingSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         // Belt-and-suspenders: ensure the forwarding session can never re-enter
@@ -149,7 +155,9 @@ final class XPURLProtocolInterceptor: URLProtocol, @unchecked Sendable {
         }
 
         guard let mutable = (request as NSURLRequest).mutableCopy() as? NSMutableURLRequest else {
-            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            let error = URLError(.badURL)
+            recordEntry(error: error)
+            client?.urlProtocol(self, didFailWithError: error)
             return
         }
         URLProtocol.setProperty(true, forKey: Self.handledKey, in: mutable)
@@ -177,6 +185,11 @@ final class XPURLProtocolInterceptor: URLProtocol, @unchecked Sendable {
 
                 let finishBlock = { [weak self] in
                     guard let self else { return }
+                    // Capture before handing control back to the URL loading
+                    // system: `didFailWithError` / `urlProtocolDidFinishLoading`
+                    // can tear this instance down synchronously (through
+                    // `stopLoading`), which would otherwise beat the capture.
+                    self.recordEntry(error: error)
                     if let data {
                         self.client?.urlProtocol(self, didLoad: data)
                     }
@@ -188,7 +201,6 @@ final class XPURLProtocolInterceptor: URLProtocol, @unchecked Sendable {
                     } else {
                         self.client?.urlProtocolDidFinishLoading(self)
                     }
-                    self.recordEntry(error: error)
                 }
 
                 let bwParams = XPNetworkThrottleManager.shared.currentParams()
@@ -212,10 +224,25 @@ final class XPURLProtocolInterceptor: URLProtocol, @unchecked Sendable {
     override func stopLoading() {
         dataTask?.cancel()
         dataTask = nil
+        // The URL loading system also calls this when it tears a load down
+        // early — a host-session timeout, `task.cancel()`, an Alamofire retry,
+        // the user leaving the screen. The forwarding completion then runs with
+        // this instance already released, so its `[weak self]` capture bails and
+        // nothing would be captured at all. Record here so a cancelled request
+        // still reaches the inspector; `didRecord` makes it a no-op after a
+        // normal finish, which routes through `stopLoading` too.
+        recordEntry(error: URLError(.cancelled))
     }
 
     private func recordEntry(error: Error?) {
-        let elapsed = (CFAbsoluteTimeGetCurrent() - startTime) * 1000.0
+        recordLock.lock()
+        guard !didRecord else { recordLock.unlock(); return }
+        didRecord = true
+        recordLock.unlock()
+
+        // A load torn down before `startLoading` has no start stamp — report 0
+        // rather than the epoch-sized interval a bare subtraction would give.
+        let elapsed = startTime > 0 ? (CFAbsoluteTimeGetCurrent() - startTime) * 1000.0 : 0
         let url = request.url?.absoluteString ?? "unknown"
         let method = request.httpMethod ?? "GET"
         let requestHeaders = request.allHTTPHeaderFields ?? [:]

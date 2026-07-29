@@ -268,6 +268,7 @@ public final class XPMonitoredSession: @unchecked Sendable {
             return session.dataTask(with: url)
         }
         let task = session.dataTask(with: url)
+        collector.noteStart(for: task.taskIdentifier)
         collector.registerCompletion(for: task.taskIdentifier, handler: completionHandler)
         if params.delayMs > 0 {
             collector.setDelay(for: task.taskIdentifier, delayMs: params.delayMs)
@@ -285,6 +286,7 @@ public final class XPMonitoredSession: @unchecked Sendable {
             return session.dataTask(with: request)
         }
         let task = session.dataTask(with: request)
+        collector.noteStart(for: task.taskIdentifier)
         collector.registerCompletion(for: task.taskIdentifier, handler: completionHandler)
         if params.delayMs > 0 {
             collector.setDelay(for: task.taskIdentifier, delayMs: params.delayMs)
@@ -293,11 +295,15 @@ public final class XPMonitoredSession: @unchecked Sendable {
     }
 
     public func dataTask(with url: URL) -> URLSessionDataTask {
-        session.dataTask(with: url)
+        let task = session.dataTask(with: url)
+        collector.noteStart(for: task.taskIdentifier)
+        return task
     }
 
     public func dataTask(with request: URLRequest) -> URLSessionDataTask {
-        session.dataTask(with: request)
+        let task = session.dataTask(with: request)
+        collector.noteStart(for: task.taskIdentifier)
+        return task
     }
 
     public var configuration: URLSessionConfiguration { session.configuration }
@@ -336,11 +342,24 @@ private final class XPDataCollector: NSObject, URLSessionDataDelegate, @unchecke
     private var bodies: [Int: Data] = [:]
     private var completions: [Int: (Data?, URLResponse?, (any Error)?) -> Void] = [:]
     private var delays: [Int: Double] = [:]
+    /// Task durations from `didFinishCollecting`, consumed when the task
+    /// completes. URLSession skips metrics for some early failures, so this is
+    /// an enrichment — never the trigger for recording an entry.
+    private var metricDurations: [Int: Double] = [:]
+    private var starts: [Int: CFAbsoluteTime] = [:]
 
     init(capture: XPNetworkCapture, records: Bool = true) {
         self.capture = capture
         self.records = records
         super.init()
+    }
+
+    /// Stamp a task's start so its duration survives a failure URLSession
+    /// never collected metrics for.
+    func noteStart(for taskId: Int) {
+        lock.lock()
+        starts[taskId] = CFAbsoluteTimeGetCurrent()
+        lock.unlock()
     }
 
     func registerCompletion(for taskId: Int, handler: @escaping (Data?, URLResponse?, (any Error)?) -> Void) {
@@ -372,7 +391,16 @@ private final class XPDataCollector: NSObject, URLSessionDataDelegate, @unchecke
         let body = bodies.removeValue(forKey: task.taskIdentifier)
         let completion = completions.removeValue(forKey: task.taskIdentifier)
         let delayMs = delays.removeValue(forKey: task.taskIdentifier)
+        let metricMs = metricDurations.removeValue(forKey: task.taskIdentifier)
+        let start = starts.removeValue(forKey: task.taskIdentifier)
         lock.unlock()
+
+        // Record here rather than in `didFinishCollecting`: this callback fires
+        // for every outcome, so a request that failed, timed out, or was
+        // cancelled is captured even when URLSession collected no metrics for
+        // it. Ahead of the completion handler, which may tear the caller down.
+        let durationMs = metricMs ?? start.map { (CFAbsoluteTimeGetCurrent() - $0) * 1000.0 } ?? 0
+        record(task: task, body: body, error: error, durationMs: durationMs)
 
         if let delayMs, delayMs > 0 {
             DispatchQueue.global().asyncAfter(deadline: .now() + delayMs / 1000.0) {
@@ -384,12 +412,14 @@ private final class XPDataCollector: NSObject, URLSessionDataDelegate, @unchecke
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+        lock.lock()
+        metricDurations[task.taskIdentifier] = metrics.taskInterval.duration * 1000.0
+        lock.unlock()
+    }
+
+    private func record(task: URLSessionTask, body: Data?, error: (any Error)?, durationMs: Double) {
         // An injected interceptor already recorded this request — don't duplicate.
         guard records else { return }
-
-        lock.lock()
-        let body = bodies[task.taskIdentifier]
-        lock.unlock()
 
         guard let capture, let request = task.currentRequest ?? task.originalRequest,
               let url = request.url else { return }
@@ -408,19 +438,6 @@ private final class XPDataCollector: NSObject, URLSessionDataDelegate, @unchecke
             requestBodyPreview = String(data: httpBody.prefix(4096), encoding: .utf8)
         }
 
-        var responseBodyPreview: String?
-        if let data = body, data.count > 0 {
-            let contentType = responseHeaders.first { $0.key.lowercased() == "content-type" }?.value.lowercased() ?? ""
-            let isText = contentType.contains("json") || contentType.contains("text") || contentType.contains("xml") || contentType.contains("html")
-            if isText {
-                responseBodyPreview = String(data: data.prefix(8192), encoding: .utf8)
-            } else {
-                responseBodyPreview = "<binary \(data.count) bytes, \(contentType)>"
-            }
-        }
-
-        let durationMs = metrics.taskInterval.duration * 1000.0
-
         let entry = XPNetworkEntry(
             url: url.absoluteString,
             method: request.httpMethod ?? "GET",
@@ -428,13 +445,26 @@ private final class XPDataCollector: NSObject, URLSessionDataDelegate, @unchecke
             requestHeaders: requestHeaders,
             responseHeaders: responseHeaders,
             requestBodyPreview: requestBodyPreview,
-            responseBodyPreview: responseBodyPreview,
+            responseBodyPreview: Self.bodyPreview(body, responseHeaders: responseHeaders),
             durationMs: durationMs,
             bytesReceived: task.countOfBytesReceived,
-            error: task.error?.localizedDescription,
+            // The delegate's error is authoritative; `task.error` is a fallback
+            // for the paths that reach here without one.
+            error: (error ?? task.error)?.localizedDescription,
             timestamp: Date()
         )
 
         capture.record(entry)
+    }
+
+    /// Text response bodies are previewed inline; anything else is summarised by
+    /// size and type so a binary payload never lands in the log.
+    private static func bodyPreview(_ body: Data?, responseHeaders: [String: String]) -> String? {
+        guard let data = body, data.count > 0 else { return nil }
+        let contentType = responseHeaders.first { $0.key.lowercased() == "content-type" }?.value.lowercased() ?? ""
+        let isText = contentType.contains("json") || contentType.contains("text")
+            || contentType.contains("xml") || contentType.contains("html")
+        guard isText else { return "<binary \(data.count) bytes, \(contentType)>" }
+        return String(data: data.prefix(8192), encoding: .utf8)
     }
 }
