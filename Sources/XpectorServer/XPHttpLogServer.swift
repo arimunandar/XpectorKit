@@ -1328,6 +1328,16 @@ final class XPHttpLogServer: @unchecked Sendable {
         }
         return fields;
       }
+      // Split an application/x-www-form-urlencoded body into its fields so each gets
+      // its own --data line. curl re-joins multiple --data with '&', so the bytes on
+      // the wire are identical. Returns null when the body isn't cleanly splittable,
+      // and the caller falls back to a single --data blob.
+      function splitFormFields(body) {
+        const segs = body.split('&');
+        if (segs.length < 2) return null;
+        for (const s of segs) if (!/^[^&=]+=[^&]*$/.test(s)) return null;
+        return segs;
+      }
       function buildCurl(net) {
         const parts = ['curl -sS'];
         const m = (net.method || 'GET').toUpperCase();
@@ -1338,18 +1348,31 @@ final class XPHttpLogServer: @unchecked Sendable {
         const ct = Object.keys(h).find(k => k.toLowerCase() === 'content-type');
         const ctVal = ct ? h[ct] : '';
         const boundaryMatch = ctVal.match(/^multipart\\/form-data;\\s*boundary=(.+)/i);
-        for (const k in h) {
-          if (skip[k.toLowerCase()]) continue;
+        const isForm = /^application\\/x-www-form-urlencoded/i.test(ctVal);
+        // Sorted like the headers table: object key order isn't guaranteed, so an
+        // unsorted loop reshuffles the -H lines between renders of the same request.
+        const keys = Object.keys(h).filter(k => !skip[k.toLowerCase()]);
+        keys.sort((a, b) => canonHeader(a).localeCompare(canonHeader(b)));
+        for (const k of keys) {
           if (boundaryMatch && k.toLowerCase() === 'content-type') continue;
           parts.push('-H ' + shellEscape(k + ': ' + h[k]));
         }
-        if (boundaryMatch && net.requestBodyPreview) {
-          const fields = parseMultipartFields(net.requestBodyPreview, boundaryMatch[1]);
+        const body = net.requestBodyPreview;
+        if (boundaryMatch && body) {
+          const fields = parseMultipartFields(body, boundaryMatch[1]);
           for (const f of fields) parts.push('-F ' + shellEscape(f.name + '=' + f.value));
-        } else if (net.requestBodyPreview) {
-          parts.push('--data ' + shellEscape(net.requestBodyPreview));
+        } else if (body) {
+          const fields = isForm ? splitFormFields(body) : null;
+          if (fields) for (const f of fields) parts.push('--data ' + shellEscape(f));
+          else parts.push('--data ' + shellEscape(body));
         }
-        return parts.join(' \\\n    ');
+        // One argument per line, continued with a trailing backslash. Both built from
+        // char codes rather than escape sequences: this source lives inside a Swift
+        // string literal, where a lone "\\n" would decode to a real newline and turn
+        // ' \\<newline>' into a JS line continuation — silently collapsing the whole
+        // command onto one line. That was the bug this replaced.
+        const bs = String.fromCharCode(92), lf = String.fromCharCode(10);
+        return parts.join(' ' + bs + lf + '  ');
       }
 
       // ---- logs ----

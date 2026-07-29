@@ -466,8 +466,12 @@ private func buildCurl(_ e: XPNetworkEntry) -> String {
         else { return nil }
         return String(ctVal[range.upperBound...]).trimmingCharacters(in: .whitespaces)
     }()
-    for (k, v) in e.requestHeaders where !skip.contains(k.lowercased()) {
-        if boundary != nil && k.lowercased() == "content-type" { continue }
+    let isForm = ctVal.lowercased().hasPrefix("application/x-www-form-urlencoded")
+    // Sorted to match the Headers tab and to keep the command stable between
+    // renders — Dictionary iteration order isn't guaranteed.
+    let headers = e.requestHeaders.sorted { $0.key.lowercased() < $1.key.lowercased() }
+    for (k, v) in headers where !skip.contains(k.lowercased()) {
+        if boundary != nil, k.lowercased() == "content-type" { continue }
         parts.append("-H \(xpShellEscape("\(k): \(v)"))")
     }
     if let boundary, let b = e.requestBodyPreview, !b.isEmpty {
@@ -475,9 +479,31 @@ private func buildCurl(_ e: XPNetworkEntry) -> String {
             parts.append("-F \(xpShellEscape("\(f.name)=\(f.value)"))")
         }
     } else if let b = e.requestBodyPreview, !b.isEmpty {
-        parts.append("-d \(xpShellEscape(b))")
+        if let fields = isForm ? xpSplitFormFields(b) : nil {
+            for f in fields {
+                parts.append("--data \(xpShellEscape(f))")
+            }
+        } else {
+            parts.append("--data \(xpShellEscape(b))")
+        }
     }
-    return parts.joined(separator: " \\\n    ")
+    // One argument per line, continued with a trailing backslash, so a long
+    // request reads top-to-bottom instead of as one wrapped paragraph.
+    return parts.joined(separator: " \\\n  ")
+}
+
+/// Splits an `application/x-www-form-urlencoded` body into its fields so each gets its
+/// own `--data` line. curl re-joins multiple `--data` with `&`, so the bytes on the wire
+/// are identical. Returns `nil` when the body isn't cleanly splittable, in which case the
+/// caller keeps it as a single `--data` blob.
+private func xpSplitFormFields(_ body: String) -> [String]? {
+    let segs = body.components(separatedBy: "&")
+    guard segs.count > 1 else { return nil }
+
+    for s in segs {
+        guard let eq = s.firstIndex(of: "="), eq != s.startIndex else { return nil }
+    }
+    return segs
 }
 
 private func xpShellEscape(_ s: String) -> String {
