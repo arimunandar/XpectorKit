@@ -589,10 +589,48 @@ final class XPHttpLogServer: @unchecked Sendable {
       header input[type=text]:focus { outline: none; border-color: #3a6fae; }
       header input[type=text]::placeholder { color: #5d646e; }
       header label { font-size: 12px; color: #9aa1ab; display: flex; align-items: center; gap: 7px; cursor: pointer; flex: 0 0 auto; }
-      header select {
+      /* Host filter: a checkbox popover rather than a <select>, so several hosts can
+         be shown at once. An empty selection means "all hosts". */
+      #baseFilterLabel { position: relative; display: flex; flex: 0 0 auto; }
+      .hostf-btn {
+        display: flex; align-items: center; gap: 7px; max-width: 230px;
         background: #0d0f12; border: 1px solid #2a2f37; color: #d6dae0;
-        padding: 7px 11px; border-radius: 8px; font: inherit; max-width: 220px; cursor: pointer;
+        padding: 7px 11px; border-radius: 8px; font: inherit; cursor: pointer;
+        transition: border-color .15s, color .15s;
       }
+      .hostf-btn:hover { border-color: #3a414c; }
+      .hostf-btn.on { border-color: #3a6fae; color: #cfe0f5; }
+      .hostf-btn .lbl { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .hostf-btn .caret { flex: 0 0 auto; font-size: 8px; color: #8b929c; }
+      .hostf-pop {
+        position: absolute; top: calc(100% + 6px); left: 0; z-index: 40;
+        min-width: 262px; max-width: 340px; max-height: 60vh; overflow-y: auto;
+        background: #15181d; border: 1px solid #2a2f37; border-radius: 10px;
+        padding: 5px; box-shadow: 0 12px 28px rgba(0,0,0,.5);
+      }
+      .hostf-pop.hidden { display: none; }
+      .hostf-search {
+        width: 100%; background: #0d0f12; border: 1px solid #2a2f37; color: #d6dae0;
+        padding: 6px 9px; border-radius: 7px; font: inherit; margin-bottom: 4px;
+      }
+      .hostf-search:focus { outline: none; border-color: #3a6fae; }
+      .hostf-search::placeholder { color: #5d646e; }
+      .hostf-row {
+        display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+        border-radius: 7px; cursor: pointer; color: #b6bcc6; font-size: 12px;
+      }
+      .hostf-row:hover { background: #1f242b; }
+      .hostf-row.hidden { display: none; }
+      .hostf-row input { accent-color: #6fd08c; flex: 0 0 auto; margin: 0; }
+      .hostf-row .h { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .hostf-all { border-bottom: 1px solid #23272e; margin-bottom: 3px; padding-bottom: 7px; color: #d6dae0; }
+      .hostf-only {
+        flex: 0 0 auto; background: transparent; border: 0; color: #6d7581; font: inherit;
+        font-size: 11px; padding: 1px 5px; border-radius: 5px; cursor: pointer; visibility: hidden;
+      }
+      .hostf-row:hover .hostf-only { visibility: visible; }
+      .hostf-only:hover { background: #2a2f37; color: #cfe0f5; }
+      .hostf-empty { padding: 8px; color: #6d7581; font-size: 12px; }
       /* autoscroll: a custom pill switch in place of the native checkbox */
       #autoscroll {
         appearance: none; -webkit-appearance: none; margin: 0; position: relative; flex: 0 0 auto;
@@ -964,8 +1002,10 @@ final class XPHttpLogServer: @unchecked Sendable {
         .controls { flex: 1 1 100%; gap: 9px; }
         #filter { flex: 1 1 auto; }
         #baseFilterLabel { flex: 1 1 100%; }
-        #baseFilterLabel select { flex: 1 1 auto; width: 100%; max-width: none; padding: 10px 12px; }
-        header select { flex: 0 0 auto; padding: 9px 11px; }
+        .hostf-btn { flex: 1 1 auto; width: 100%; max-width: none; padding: 10px 12px; }
+        .hostf-pop { right: 0; max-width: none; }
+        .hostf-row { padding: 9px 8px; }        /* comfortable touch target */
+        .hostf-only { visibility: visible; }    /* there is no hover on touch */
         .act { padding: 9px 13px; }
         .act-icon { padding: 9px; }
         .act-icon svg { width: 18px; height: 18px; }
@@ -1047,7 +1087,12 @@ final class XPHttpLogServer: @unchecked Sendable {
           </div>
           <span id="status" class="status down">connecting…</span>
           <label id="autoscrollLabel"><input id="autoscroll" type="checkbox" checked> autoscroll</label>
-          <label id="baseFilterLabel"><select id="baseFilter"><option value="">All hosts</option></select></label>
+          <div id="baseFilterLabel">
+            <button class="hostf-btn" id="hostfBtn" type="button"
+                    aria-haspopup="true" aria-expanded="false"
+            ><span class="lbl">All hosts</span><span class="caret">&#9660;</span></button>
+            <div class="hostf-pop hidden" id="hostfPop"></div>
+          </div>
           <span class="spacer"></span>
           <div class="controls">
             <input id="filter" type="text" placeholder="filter logs…" autocomplete="off" spellcheck="false">
@@ -1132,12 +1177,17 @@ final class XPHttpLogServer: @unchecked Sendable {
       const isMobile = () => window.matchMedia('(max-width: 680px)').matches;
       const leakListEl = document.getElementById('leakList');
       const leakCountEl = document.getElementById('leakCount');
-      const baseFilterEl = document.getElementById('baseFilter');
+      const hostfBtn = document.getElementById('hostfBtn');
+      const hostfPop = document.getElementById('hostfPop');
       const navListEl = document.getElementById('navList');
       const navCountEl = document.getElementById('navCount');
       let filterText = '';
-      let baseFilter = '';        // selected host, or '' for all
+      // Hosts to show. Empty means "all hosts" — an include-list rather than a list of
+      // hosts to hide, so a selection stays valid however many new hosts turn up later.
+      const shownHosts = new Set();
       const hosts = new Set();    // distinct hosts seen, for the dropdown
+      let hostfDirty = true;      // rebuild the popover rows on next open
+      let hostSearch = '';        // type-to-filter inside the popover
       let activeView = 'logs';
       let streaming = true;
       const nets = {};            // id -> entry
@@ -1229,17 +1279,131 @@ final class XPHttpLogServer: @unchecked Sendable {
       function hostOf(url) {
         try { return new URL(url).host; } catch (_) { return ''; }
       }
-      // Add a host to the dropdown the first time it's seen, keeping options sorted.
-      function ensureHostOption(h) {
+      // ---- host filter ----
+      const HOST_SEARCH_MIN = 8;   // a search box is only worth it once the list is long
+
+      // Register a host the first time it's seen. The rows are rebuilt lazily when the
+      // popover opens rather than per request, so a burst of traffic can't thrash the DOM.
+      function ensureHost(h) {
         if (!h || hosts.has(h)) return;
         hosts.add(h);
-        const opt = document.createElement('option');
-        opt.value = h; opt.textContent = h;
-        const sorted = [...hosts].sort();
-        const idx = sorted.indexOf(h);
-        // +1 for the leading "All hosts" option.
-        baseFilterEl.insertBefore(opt, baseFilterEl.children[idx + 1] || null);
+        hostfDirty = true;
+        if (!hostfPop.classList.contains('hidden')) buildHostPopover();
+        updateHostButton();
       }
+
+      // One row: checkbox + host name + "Only". Built through the DOM because host names
+      // come off the stream — interpolating them into markup would be an XSS sink.
+      function hostRow(label, onToggle, onOnly) {
+        const row = document.createElement('label');
+        row.className = 'hostf-row';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.onchange = () => onToggle(cb.checked);
+        const name = document.createElement('span');
+        name.className = 'h';
+        name.textContent = label;
+        row.appendChild(cb); row.appendChild(name);
+        if (onOnly) {
+          const only = document.createElement('button');
+          only.type = 'button'; only.className = 'hostf-only';
+          only.textContent = 'Only'; only.title = 'Show only this host';
+          // preventDefault so activating the button doesn't also toggle the row's label.
+          only.onclick = (e) => { e.preventDefault(); e.stopPropagation(); onOnly(); };
+          row.appendChild(only);
+        }
+        return row;
+      }
+
+      function buildHostPopover() {
+        hostfPop.innerHTML = '';
+        const sorted = [...hosts].sort();
+        if (sorted.length >= HOST_SEARCH_MIN) {
+          const s = document.createElement('input');
+          s.className = 'hostf-search'; s.type = 'text'; s.placeholder = 'filter hosts…';
+          s.autocomplete = 'off'; s.spellcheck = false; s.value = hostSearch;
+          s.oninput = () => { hostSearch = s.value.trim().toLowerCase(); applyHostSearch(); };
+          hostfPop.appendChild(s);
+        }
+        if (!sorted.length) {
+          const d = document.createElement('div');
+          d.className = 'hostf-empty'; d.textContent = 'No hosts captured yet.';
+          hostfPop.appendChild(d);
+          hostfDirty = false;
+          return;
+        }
+        const all = hostRow('All hosts', () => { shownHosts.clear(); syncHostFilter(); }, null);
+        all.classList.add('hostf-all');
+        hostfPop.appendChild(all);
+        for (const h of sorted) {
+          hostfPop.appendChild(hostRow(h, (on) => {
+            if (on) shownHosts.add(h); else shownHosts.delete(h);
+            syncHostFilter();
+          }, () => {
+            shownHosts.clear(); shownHosts.add(h); syncHostFilter();
+          }));
+        }
+        hostfDirty = false;
+        syncHostRows();
+        applyHostSearch();
+      }
+
+      // Mirror shownHosts onto the rows. Updating in place instead of rebuilding keeps
+      // the search box's focus and caret while checkboxes are toggled.
+      function syncHostRows() {
+        for (const row of hostfPop.querySelectorAll('.hostf-row')) {
+          const cb = row.querySelector('input');
+          if (row.classList.contains('hostf-all')) {
+            cb.checked = shownHosts.size === 0;
+            cb.indeterminate = shownHosts.size > 0;
+          } else {
+            cb.checked = shownHosts.has(row.querySelector('.h').textContent);
+          }
+        }
+      }
+
+      function applyHostSearch() {
+        for (const row of hostfPop.querySelectorAll('.hostf-row')) {
+          if (row.classList.contains('hostf-all')) continue;
+          const h = row.querySelector('.h').textContent.toLowerCase();
+          row.classList.toggle('hidden', !!hostSearch && !h.includes(hostSearch));
+        }
+      }
+
+      function syncHostFilter() {
+        syncHostRows();
+        updateHostButton();
+        applyFilter();
+      }
+
+      // The label always states what is actually being shown, so a filtered-out host is
+      // never a mystery — paired with the visible/total badge in updateNetCount.
+      function updateHostButton() {
+        const n = shownHosts.size;
+        const lbl = hostfBtn.querySelector('.lbl');
+        if (!n) lbl.textContent = 'All hosts';
+        else if (n === 1) lbl.textContent = [...shownHosts][0];
+        else lbl.textContent = n + ' of ' + hosts.size + ' hosts';
+        hostfBtn.classList.toggle('on', n > 0);
+        hostfBtn.title = n ? 'Showing ' + lbl.textContent + ' — click to change' : 'Filter requests by host';
+      }
+
+      function openHostPopover() {
+        if (hostfDirty) buildHostPopover(); else syncHostRows();
+        hostfPop.classList.remove('hidden');
+        hostfBtn.setAttribute('aria-expanded', 'true');
+      }
+      function closeHostPopover() {
+        hostfPop.classList.add('hidden');
+        hostfBtn.setAttribute('aria-expanded', 'false');
+      }
+      hostfBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (hostfPop.classList.contains('hidden')) openHostPopover(); else closeHostPopover();
+      };
+      hostfPop.onclick = (e) => e.stopPropagation();   // keep it open while toggling rows
+      document.addEventListener('click', closeHostPopover);
+      document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeHostPopover(); });
       function pretty(body) {
         if (!body) return '(empty)';
         try { return JSON.stringify(JSON.parse(body), null, 2); } catch (_) { return body; }
@@ -1387,7 +1551,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         item.onclick = () => selectNet(net.id);
         netListEl.insertBefore(item, netListEl.firstChild);   // newest on top
         refreshItem(net);
-        netCountEl.textContent = Object.keys(nets).length;
+        updateNetCount();
         if (selectedId === null) selectNet(net.id);
       }
 
@@ -1398,7 +1562,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         const codeCls = net.error ? 'st-5' : statusClass(net.statusCode);
         item.dataset.search = netSearchText(net);
         item.dataset.host = hostOf(net.url);
-        ensureHostOption(item.dataset.host);
+        ensureHost(item.dataset.host);
         item.innerHTML =
           '<span class="badge ' + methodClass(net.method) + '"></span>' +
           '<span class="path"></span>' +
@@ -1408,9 +1572,25 @@ final class XPHttpLogServer: @unchecked Sendable {
         item.classList.toggle('hidden', !netItemVisible(item));
       }
 
-      // A request row passes when it matches the text filter AND the selected host.
+      // A request row passes when it matches the text filter AND the host filter
+      // (an empty host selection means every host).
       function netItemVisible(item) {
-        return matches(item.dataset.search) && (!baseFilter || item.dataset.host === baseFilter);
+        return matches(item.dataset.search) && (!shownHosts.size || shownHosts.has(item.dataset.host));
+      }
+
+      // Keep the tab badge honest: while a host filter is on it reads visible/total, so
+      // traffic withheld by the filter is always accounted for rather than just missing.
+      function updateNetCount() {
+        const total = Object.keys(nets).length;
+        if (!shownHosts.size) {
+          netCountEl.textContent = String(total);
+          netCountEl.title = '';
+          return;
+        }
+        let shown = 0;
+        for (const item of netListEl.children) if (shownHosts.has(item.dataset.host)) shown++;
+        netCountEl.textContent = shown + '/' + total;
+        netCountEl.title = shown + ' of ' + total + ' shown · ' + (total - shown) + ' hidden by host filter';
       }
 
       function selectNet(id) {
@@ -2253,6 +2433,7 @@ final class XPHttpLogServer: @unchecked Sendable {
           for (const row of logEl.children) row.classList.toggle('hidden', !matches(row.dataset.search));
         } else if (activeView === 'net') {
           for (const item of netListEl.children) item.classList.toggle('hidden', !netItemVisible(item));
+          updateNetCount();
         } else if (activeView === 'ws') {
           for (const row of wsListEl.children) {
             if (row.dataset && row.dataset.cid != null) row.classList.toggle('hidden', !matches(row.dataset.search));
@@ -2268,7 +2449,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         }
       }
       filterEl.addEventListener('input', () => { filterText = filterEl.value.trim().toLowerCase(); applyFilter(); });
-      baseFilterEl.addEventListener('change', () => { baseFilter = baseFilterEl.value; applyFilter(); });
+
       document.getElementById('clear').addEventListener('click', () => {
         if (activeView === 'logs') { logEl.innerHTML = ''; return; }
         if (activeView === 'ws') {
@@ -2292,11 +2473,15 @@ final class XPHttpLogServer: @unchecked Sendable {
         netListEl.innerHTML = '';
         for (const k in nets) delete nets[k];
         selectedId = null;
-        netCountEl.textContent = '0';
+
         netDetailEl.innerHTML = '<div class="net-empty">Select a request to inspect it.</div>';
         hosts.clear();
-        baseFilter = '';
-        baseFilterEl.innerHTML = '<option value="">All hosts</option>';
+        shownHosts.clear();
+        hostSearch = '';
+        hostfDirty = true;
+        closeHostPopover();
+        updateHostButton();
+        updateNetCount();
       });
 
       // ---- stream ----
@@ -2312,6 +2497,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         try { addNav(JSON.parse(e.data)); } catch (_) {}
         if (activeView === 'layers' && layersLiveEl.checked) setTimeout(refreshLayersLive, 350);
       });
+      updateHostButton();
       setView('logs');
     </script>
     </body>
