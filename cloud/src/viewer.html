@@ -384,6 +384,7 @@
     fill: #ffb3c1; font: 600 10px ui-monospace, SFMono-Regular, Menlo, monospace;
     paint-order: stroke; stroke: rgba(13,15,18,.9); stroke-width: 3px;
   }
+  .layers-measure-svg .ms-dim { font-size: 11px; font-weight: 700; }
   .act.on { background: #1d2c40; border-color: #3a6fae; color: #cfe0ff; }
   .layers-hint {
     position: absolute; top: 50%; left: 0; right: 0; transform: translateY(-50%);
@@ -1550,30 +1551,61 @@
     }
     return segs.filter(s => Math.abs(s.x2 - s.x1) + Math.abs(s.y2 - s.y1) > 0.01);
   }
+  function drawSeg(s) {
+    const horizontal = s.y1 === s.y2;
+    const len = Math.abs(s.x2 - s.x1) + Math.abs(s.y2 - s.y1);
+    measureSvgEl.appendChild(svgChild('line', {
+      class: 'ms-line', x1: s.x1 * layFit, y1: s.y1 * layFit, x2: s.x2 * layFit, y2: s.y2 * layFit,
+    }));
+    const label = svgChild('text', {
+      class: 'ms-label',
+      x: ((s.x1 + s.x2) / 2) * layFit + (horizontal ? 0 : 4),
+      y: ((s.y1 + s.y2) / 2) * layFit + (horizontal ? -4 : 3),
+    });
+    if (horizontal) label.setAttribute('text-anchor', 'middle');
+    label.textContent = fmt1(len);
+    measureSvgEl.appendChild(label);
+  }
   function drawMeasure() {
     if (!measureSvgEl) return;
     while (measureSvgEl.firstChild) measureSvgEl.removeChild(measureSvgEl.firstChild);
-    if (!measureMode || !selectedNodeId || !measureHoverId || measureHoverId === selectedNodeId) return;
+    if (!measureMode || !selectedNodeId) return;
     const a = treeRowEls[selectedNodeId] && treeRowEls[selectedNodeId]._node;
-    const b = treeRowEls[measureHoverId] && treeRowEls[measureHoverId]._node;
-    if (!a || !b) return;
-    measureSvgEl.appendChild(svgChild('rect', {
-      class: 'ms-rect', x: b.x * layFit, y: b.y * layFit, width: b.w * layFit, height: b.h * layFit,
-    }));
-    for (const s of measureSegs(a, b)) {
-      const horizontal = s.y1 === s.y2;
-      const len = Math.abs(s.x2 - s.x1) + Math.abs(s.y2 - s.y1);
-      measureSvgEl.appendChild(svgChild('line', {
-        class: 'ms-line', x1: s.x1 * layFit, y1: s.y1 * layFit, x2: s.x2 * layFit, y2: s.y2 * layFit,
+    if (!a) return;
+    const hoverRow = measureHoverId && measureHoverId !== selectedNodeId && treeRowEls[measureHoverId];
+    const b = hoverRow ? hoverRow._node : null;
+    if (b) {
+      measureSvgEl.appendChild(svgChild('rect', {
+        class: 'ms-rect', x: b.x * layFit, y: b.y * layFit, width: b.w * layFit, height: b.h * layFit,
       }));
-      const label = svgChild('text', {
-        class: 'ms-label',
-        x: ((s.x1 + s.x2) / 2) * layFit + (horizontal ? 0 : 4),
-        y: ((s.y1 + s.y2) / 2) * layFit + (horizontal ? -4 : 3),
-      });
-      if (horizontal) label.setAttribute('text-anchor', 'middle');
-      label.textContent = fmt1(len);
-      measureSvgEl.appendChild(label);
+      for (const s of measureSegs(a, b)) drawSeg(s);
+      return;
+    }
+    drawSelfRedlines(a);
+  }
+  // Figma-style redlines for the selection alone: its dimensions plus gap
+  // lines to the parent's four edges (the drawn form of the Spacing card).
+  function drawSelfRedlines(a) {
+    const dim = svgChild('text', {
+      class: 'ms-label ms-dim', 'text-anchor': 'middle',
+      x: (a.x + a.w / 2) * layFit, y: (a.y + a.h) * layFit + 12,
+    });
+    dim.textContent = fmt1(a.w) + ' × ' + fmt1(a.h);
+    measureSvgEl.appendChild(dim);
+    const p = a._parent;
+    if (!p) return;
+    measureSvgEl.appendChild(svgChild('rect', {
+      class: 'ms-rect', x: p.x * layFit, y: p.y * layFit, width: p.w * layFit, height: p.h * layFit,
+    }));
+    const midX = a.x + a.w / 2, midY = a.y + a.h / 2;
+    const segs = [
+      { x1: Math.min(p.x, a.x), y1: midY, x2: Math.max(p.x, a.x), y2: midY },
+      { x1: Math.min(a.x + a.w, p.x + p.w), y1: midY, x2: Math.max(a.x + a.w, p.x + p.w), y2: midY },
+      { x1: midX, y1: Math.min(p.y, a.y), x2: midX, y2: Math.max(p.y, a.y) },
+      { x1: midX, y1: Math.min(a.y + a.h, p.y + p.h), x2: midX, y2: Math.max(a.y + a.h, p.y + p.h) },
+    ];
+    for (const s of segs) {
+      if (Math.abs(s.x2 - s.x1) + Math.abs(s.y2 - s.y1) > 0.01) drawSeg(s);
     }
   }
   function setMeasureMode(on) {
