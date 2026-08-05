@@ -2152,10 +2152,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         if (!a) return;
         const hoverRow = measureHoverId && measureHoverId !== selectedNodeId && treeRowEls[measureHoverId];
         const b = hoverRow ? hoverRow._node : null;
-        if (b) {
-          measureSvgEl.appendChild(svgChild('rect', {
-            class: 'ms-rect', x: b.x * layFit, y: b.y * layFit, width: b.w * layFit, height: b.h * layFit,
-          }));
+        if (b) {   // the hovered slice already carries the dashed .mhov outline
           for (const s of measureSegs(a, b)) drawSeg(s);
           return;
         }
@@ -2164,22 +2161,20 @@ final class XPHttpLogServer: @unchecked Sendable {
       // Figma-style redlines for the selection alone: its dimensions plus gap
       // lines to the parent's four edges (the drawn form of the Spacing card).
       function drawSelfRedlines(a) {
-        // Keep the badge inside the scene — a full-height node would otherwise
-        // push it below the visible stage.
+        // Badge sits inside the node's bottom edge when there's room — outside it
+        // collides with gap labels and can fall off the stage.
         const sceneH = parseFloat(layersSceneEl.style.height) || 0;
-        const belowY = (a.y + a.h) * layFit + 12;
+        const bottomY = (a.y + a.h) * layFit;
+        let badgeY = a.h * layFit >= 18 ? bottomY - 6 : bottomY + 12;
+        if (badgeY > sceneH - 2) badgeY = bottomY - 6;
         const dim = svgChild('text', {
           class: 'ms-label ms-dim', 'text-anchor': 'middle',
-          x: (a.x + a.w / 2) * layFit,
-          y: belowY <= sceneH - 2 ? belowY : (a.y + a.h) * layFit - 6,
+          x: (a.x + a.w / 2) * layFit, y: badgeY,
         });
         dim.textContent = fmt1(a.w) + ' × ' + fmt1(a.h);
         measureSvgEl.appendChild(dim);
         const p = a._parent;
         if (!p) return;
-        measureSvgEl.appendChild(svgChild('rect', {
-          class: 'ms-rect', x: p.x * layFit, y: p.y * layFit, width: p.w * layFit, height: p.h * layFit,
-        }));
         const midX = a.x + a.w / 2, midY = a.y + a.h / 2;
         const segs = [
           { x1: Math.min(p.x, a.x), y1: midY, x2: Math.max(p.x, a.x), y2: midY },
