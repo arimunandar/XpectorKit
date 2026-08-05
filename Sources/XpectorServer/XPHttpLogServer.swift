@@ -2028,9 +2028,7 @@ final class XPHttpLogServer: @unchecked Sendable {
                 d.style.backgroundPosition = (-(ix - n.x) * layFit) + 'px ' + (-(iy - n.y) * layFit) + 'px';
               }
               d._order = order++;
-              d.onclick = (e) => { e.stopPropagation(); if (layDragged) return; selectNode(n.id); };
-              d.onpointerenter = () => { if (measureMode) setMeasureHover(n.id); };
-              d.onpointerleave = () => { if (measureMode && measureHoverId === n.id) setMeasureHover(null); };
+              d._node = n;
               layersSceneEl.appendChild(d);
               layerEls[n.id] = d;
             }
@@ -2090,6 +2088,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         layersSceneEl.appendChild(measureSvgEl);
       }
       function setMeasureHover(id) {
+        if (id === measureHoverId) return;
         if (measureHoverId && layerEls[measureHoverId]) layerEls[measureHoverId].classList.remove('mhov');
         measureHoverId = id;
         if (id && id !== selectedNodeId && layerEls[id]) layerEls[id].classList.add('mhov');
@@ -2417,7 +2416,12 @@ final class XPHttpLogServer: @unchecked Sendable {
         if (!measureMode) layersStageEl.classList.add('grabbing');
       });
       layersStageEl.addEventListener('pointermove', (e) => {
-        if (!layDown || measureMode) return;   // camera stays flat while measuring
+        if (measureMode) {   // camera stays flat while measuring; pointer hovers measure
+          const over = pickNodeAt(e.clientX, e.clientY);
+          setMeasureHover(over && over.id !== selectedNodeId ? over.id : null);
+          return;
+        }
+        if (!layDown) return;
         const dx = e.clientX - layDown.x, dy = e.clientY - layDown.y;
         if (Math.abs(dx) + Math.abs(dy) > 3) layDragged = true;
         layRotY += dx * 0.35; layRotX -= dy * 0.35;
@@ -2429,8 +2433,24 @@ final class XPHttpLogServer: @unchecked Sendable {
       layersStageEl.addEventListener('pointerup', endLayDrag);
       layersStageEl.addEventListener('pointerleave', endLayDrag);
       layersStageEl.addEventListener('pointercancel', endLayDrag);
-      layersStageEl.addEventListener('click', () => {
-        if (layDragged || !selectedNodeId) return;
+      // Pick the smallest visible slice under the cursor. The topmost element is
+      // usually an invisible full-screen system window (UITextEffectsWindow,
+      // UITrackingWindowView), which is never what the user is aiming at.
+      function pickNodeAt(clientX, clientY) {
+        let best = null, bestArea = Infinity;
+        for (const el of document.elementsFromPoint(clientX, clientY)) {
+          const n = el._node;
+          if (!n || n.hidden || n.alpha < 0.05) continue;
+          const area = n.w * n.h;
+          if (area < bestArea) { bestArea = area; best = n; }
+        }
+        return best;
+      }
+      layersStageEl.addEventListener('click', (e) => {
+        if (layDragged) return;
+        const picked = pickNodeAt(e.clientX, e.clientY);
+        if (picked) { selectNode(picked.id); return; }
+        if (!selectedNodeId) return;
         if (layerEls[selectedNodeId]) layerEls[selectedNodeId].classList.remove('sel');
         if (treeRowEls[selectedNodeId]) treeRowEls[selectedNodeId].classList.remove('sel');
         selectedNodeId = null; layersInfoEl.classList.add('hidden'); clearProps(); drawMeasure();
