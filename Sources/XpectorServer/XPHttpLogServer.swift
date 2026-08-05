@@ -2155,9 +2155,14 @@ final class XPHttpLogServer: @unchecked Sendable {
       // Figma-style redlines for the selection alone: its dimensions plus gap
       // lines to the parent's four edges (the drawn form of the Spacing card).
       function drawSelfRedlines(a) {
+        // Keep the badge inside the scene — a full-height node would otherwise
+        // push it below the visible stage.
+        const sceneH = parseFloat(layersSceneEl.style.height) || 0;
+        const belowY = (a.y + a.h) * layFit + 12;
         const dim = svgChild('text', {
           class: 'ms-label ms-dim', 'text-anchor': 'middle',
-          x: (a.x + a.w / 2) * layFit, y: (a.y + a.h) * layFit + 12,
+          x: (a.x + a.w / 2) * layFit,
+          y: belowY <= sceneH - 2 ? belowY : (a.y + a.h) * layFit - 6,
         });
         dim.textContent = fmt1(a.w) + ' × ' + fmt1(a.h);
         measureSvgEl.appendChild(dim);
@@ -2180,6 +2185,13 @@ final class XPHttpLogServer: @unchecked Sendable {
       function setMeasureMode(on) {
         measureMode = on;
         layersMeasureBtnEl.classList.toggle('on', on);
+        if (on && !selectedNodeId) {
+          layersInfoEl.innerHTML = '<div class="li-meta"></div>';
+          layersInfoEl.querySelector('.li-meta').textContent =
+            'measure: select a node to see its redlines, then hover another node for gaps';
+          layersInfoEl.classList.remove('hidden');
+        }
+        if (!on && !selectedNodeId) layersInfoEl.classList.add('hidden');
         if (on) {
           // Flatten the camera: measuring only makes sense in 2D, and it keeps
           // the SVG overlay aligned with the slices.
