@@ -26,7 +26,7 @@ final class XPHttpLogServer: @unchecked Sendable {
 
     /// Open SSE client sockets. Each `GET /stream` adds its fd here; a failed
     /// write removes it.
-    private var writers: Set<Int32> = []
+    private var writers = Set<Int32>()
 
     /// Snapshot accessors for the recent buffers, so a freshly-connected viewer
     /// immediately sees history. Provided by `XpectorServer`, which owns the
@@ -93,11 +93,14 @@ final class XPHttpLogServer: @unchecked Sendable {
         self.currentScreenshot = currentScreenshot
     }
 
-    var actualPort: UInt16 { port }
+    var actualPort: UInt16 {
+        port
+    }
 
     func start() {
         lock.lock()
         guard !running else { lock.unlock(); return }
+
         running = true
         lock.unlock()
 
@@ -129,13 +132,16 @@ final class XPHttpLogServer: @unchecked Sendable {
         keepaliveTimer = nil
 
         if sfd >= 0 { close(sfd) }
-        for fd in openWriters { close(fd) }
+        for fd in openWriters {
+            close(fd)
+        }
     }
 
     /// Push one log entry to every connected SSE viewer as a default `data:`
     /// event (the viewer's `onmessage` handler).
     func push(_ entry: XPLogEntry) {
         guard let json = encode(entry) else { return }
+
         broadcastRaw("data: \(json)\n\n")
     }
 
@@ -144,12 +150,14 @@ final class XPHttpLogServer: @unchecked Sendable {
     /// is off-device, the same egress class as the Mac/remote inspector.
     func pushNetwork(_ entry: XPNetworkEntry) {
         guard let json = encode(entry) else { return }
+
         broadcastRaw("event: net\ndata: \(json)\n\n")
     }
 
     /// Push one leak event as a named `leak` SSE event.
     func pushLeak(_ event: XPPerfEvent) {
         guard let json = encode(event) else { return }
+
         broadcastRaw("event: leak\ndata: \(json)\n\n")
     }
 
@@ -157,6 +165,7 @@ final class XPHttpLogServer: @unchecked Sendable {
     /// `screenshot` (JPEG) rides along base64-encoded in the JSON.
     func pushNav(_ event: XPNavEvent) {
         guard let json = encode(event) else { return }
+
         broadcastRaw("event: nav\ndata: \(json)\n\n")
     }
 
@@ -164,11 +173,13 @@ final class XPHttpLogServer: @unchecked Sendable {
     /// event — the browser is off-device.
     func pushWS(_ event: XPWSEvent) {
         guard let json = encode(event) else { return }
+
         broadcastRaw("event: ws\ndata: \(json)\n\n")
     }
 
-    private func encode<T: Encodable>(_ value: T) -> String? {
+    private func encode(_ value: some Encodable) -> String? {
         guard let data = try? encoder.encode(value) else { return nil }
+
         return String(data: data, encoding: .utf8)
     }
 
@@ -181,7 +192,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         guard !targets.isEmpty else { return }
 
         let bytes = Array(text.utf8)
-        var dead: [Int32] = []
+        var dead = [Int32]()
         writeLock.lock()
         for fd in targets {
             if !writeAll(fd, bytes) { dead.append(fd) }
@@ -189,10 +200,15 @@ final class XPHttpLogServer: @unchecked Sendable {
         writeLock.unlock()
 
         guard !dead.isEmpty else { return }
+
         lock.lock()
-        for fd in dead { writers.remove(fd) }
+        for fd in dead {
+            writers.remove(fd)
+        }
         lock.unlock()
-        for fd in dead { close(fd) }
+        for fd in dead {
+            close(fd)
+        }
     }
 
     /// Writes all bytes, retrying partial sends. Returns false if the peer is
@@ -200,9 +216,12 @@ final class XPHttpLogServer: @unchecked Sendable {
     private func writeAll(_ fd: Int32, _ bytes: [UInt8]) -> Bool {
         bytes.withUnsafeBytes { buf in
             var sent = 0
+            guard let base = buf.baseAddress else { return bytes.isEmpty }
+
             while sent < bytes.count {
-                let n = Darwin.send(fd, buf.baseAddress! + sent, bytes.count - sent, 0)
+                let n = Darwin.send(fd, base + sent, bytes.count - sent, 0)
                 guard n > 0 else { return false }
+
                 sent += n
             }
             return true
@@ -212,31 +231,7 @@ final class XPHttpLogServer: @unchecked Sendable {
     // MARK: - Server thread
 
     private func runServer() {
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { return }
-
-        var on: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
-
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = in_port_t(port).bigEndian
-        addr.sin_addr.s_addr = INADDR_ANY.bigEndian
-
-        let bound = withUnsafePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        guard bound == 0 else {
-            close(fd)
-            print("[Xpector HTTP] bind failed on port \(port): errno=\(errno)")
-            return
-        }
-        guard Darwin.listen(fd, 5) == 0 else {
-            close(fd)
-            return
-        }
+        guard let fd = makeListeningSocket() else { return }
 
         lock.lock()
         serverFd = fd
@@ -260,6 +255,36 @@ final class XPHttpLogServer: @unchecked Sendable {
                 self?.handleClient(cfd)
             }
         }
+    }
+
+    private func makeListeningSocket() -> Int32? {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+
+        var on: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(port).bigEndian
+        addr.sin_addr.s_addr = INADDR_ANY.bigEndian
+
+        let bound = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bound == 0 else {
+            close(fd)
+            print("[Xpector HTTP] bind failed on port \(port): errno=\(errno)")
+            return nil
+        }
+        guard Darwin.listen(fd, 5) == 0 else {
+            close(fd)
+            return nil
+        }
+
+        return fd
     }
 
     // MARK: - HTTP
@@ -300,6 +325,7 @@ final class XPHttpLogServer: @unchecked Sendable {
             writeAndClose(fd, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             return
         }
+
         let head = "HTTP/1.1 200 OK\r\n"
             + "Content-Type: image/jpeg\r\n"
             + "Content-Length: \(data.count)\r\n"
@@ -323,12 +349,14 @@ final class XPHttpLogServer: @unchecked Sendable {
             writeAndClose(fd, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             return
         }
+
         layersJSON { [weak self] data in
             guard let self else { close(fd); return }
             guard let data, !data.isEmpty else {
-                self.writeAndClose(fd, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                writeAndClose(fd, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 return
             }
+
             let head = "HTTP/1.1 200 OK\r\n"
                 + "Content-Type: application/json\r\n"
                 + "Content-Length: \(data.count)\r\n"
@@ -336,11 +364,11 @@ final class XPHttpLogServer: @unchecked Sendable {
                 + "Access-Control-Allow-Origin: *\r\n"
                 + "Connection: close\r\n"
                 + "\r\n"
-            self.writeLock.lock()
-            if self.writeAll(fd, Array(head.utf8)) {
-                _ = self.writeAll(fd, [UInt8](data))
+            writeLock.lock()
+            if writeAll(fd, Array(head.utf8)) {
+                _ = writeAll(fd, [UInt8](data))
             }
-            self.writeLock.unlock()
+            writeLock.unlock()
             close(fd)
         }
     }
@@ -354,12 +382,14 @@ final class XPHttpLogServer: @unchecked Sendable {
             writeAndClose(fd, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             return
         }
+
         nodeDetailJSON(id) { [weak self] data in
             guard let self else { close(fd); return }
             guard let data, !data.isEmpty else {
-                self.writeAndClose(fd, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                writeAndClose(fd, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 return
             }
+
             let head = "HTTP/1.1 200 OK\r\n"
                 + "Content-Type: application/json\r\n"
                 + "Content-Length: \(data.count)\r\n"
@@ -367,11 +397,11 @@ final class XPHttpLogServer: @unchecked Sendable {
                 + "Access-Control-Allow-Origin: *\r\n"
                 + "Connection: close\r\n"
                 + "\r\n"
-            self.writeLock.lock()
-            if self.writeAll(fd, Array(head.utf8)) {
-                _ = self.writeAll(fd, [UInt8](data))
+            writeLock.lock()
+            if writeAll(fd, Array(head.utf8)) {
+                _ = writeAll(fd, [UInt8](data))
             }
-            self.writeLock.unlock()
+            writeLock.unlock()
             close(fd)
         }
     }
@@ -384,12 +414,14 @@ final class XPHttpLogServer: @unchecked Sendable {
             writeAndClose(fd, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             return
         }
+
         nodeImage(id) { [weak self] data in
             guard let self else { close(fd); return }
             guard let data, !data.isEmpty else {
-                self.writeAndClose(fd, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                writeAndClose(fd, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 return
             }
+
             let head = "HTTP/1.1 200 OK\r\n"
                 + "Content-Type: image/png\r\n"
                 + "Content-Length: \(data.count)\r\n"
@@ -398,11 +430,11 @@ final class XPHttpLogServer: @unchecked Sendable {
                 + "Access-Control-Allow-Origin: *\r\n"
                 + "Connection: close\r\n"
                 + "\r\n"
-            self.writeLock.lock()
-            if self.writeAll(fd, Array(head.utf8)) {
-                _ = self.writeAll(fd, [UInt8](data))
+            writeLock.lock()
+            if writeAll(fd, Array(head.utf8)) {
+                _ = writeAll(fd, [UInt8](data))
             }
-            self.writeLock.unlock()
+            writeLock.unlock()
             close(fd)
         }
     }
@@ -424,10 +456,14 @@ final class XPHttpLogServer: @unchecked Sendable {
             }
         }
         guard let head = String(data: data, encoding: .utf8) else { return nil }
+
         // Request line: "GET /path HTTP/1.1"
-        guard let firstLine = head.split(separator: "\r\n", maxSplits: 1, omittingEmptySubsequences: false).first else { return nil }
+        let headLines = head.split(separator: "\r\n", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let firstLine = headLines.first else { return nil }
+
         let parts = firstLine.split(separator: " ")
         guard parts.count >= 2, parts[0] == "GET" else { return nil }
+
         // Strip any query string — we route on the bare path.
         let rawPath = String(parts[1])
         return String(rawPath.split(separator: "?", maxSplits: 1).first ?? "")
@@ -451,30 +487,39 @@ final class XPHttpLogServer: @unchecked Sendable {
         writers.insert(fd)
         lock.unlock()
 
-        // Replay recent history so a fresh viewer sees context immediately:
-        // logs first, then recent network requests (each as its named event).
+        replayHistory(fd)
+        // The fd stays open and registered; live pushes + keepalives flow until
+        // a write fails (client gone), which prunes it.
+    }
+
+    /// Replay recent history so a fresh viewer sees context immediately:
+    /// logs first, then recent network requests (each as its named event).
+    private func replayHistory(_ fd: Int32) {
         for entry in recentLogs() {
             guard let json = encode(entry) else { continue }
+
             if !writeChunk(fd, "data: \(json)\n\n") { return }
         }
         for entry in recentNetwork() {
             guard let json = encode(entry) else { continue }
+
             if !writeChunk(fd, "event: net\ndata: \(json)\n\n") { return }
         }
         for event in recentLeaks() {
             guard let json = encode(event) else { continue }
+
             if !writeChunk(fd, "event: leak\ndata: \(json)\n\n") { return }
         }
         for event in recentNav() {
             guard let json = encode(event) else { continue }
+
             if !writeChunk(fd, "event: nav\ndata: \(json)\n\n") { return }
         }
         for event in recentWS() {
             guard let json = encode(event) else { continue }
+
             if !writeChunk(fd, "event: ws\ndata: \(json)\n\n") { return }
         }
-        // The fd stays open and registered; live pushes + keepalives flow until
-        // a write fails (client gone), which prunes it.
     }
 
     /// Writes one already-formatted SSE chunk to a single client (used for
@@ -501,7 +546,8 @@ final class XPHttpLogServer: @unchecked Sendable {
 
     private func serveHTML(_ fd: Int32) {
         let page = Self.viewerHTML.replacingOccurrences(
-            of: "__XP_APP_NAME__", with: Self.htmlEscape(appName))
+            of: "__XP_APP_NAME__", with: Self.htmlEscape(appName)
+        )
         let body = Array(page.utf8)
         let head = "HTTP/1.1 200 OK\r\n"
             + "Content-Type: text/html; charset=utf-8\r\n"
@@ -906,6 +952,15 @@ final class XPHttpLogServer: @unchecked Sendable {
         transition: outline-color .1s;
       }
       .layer.sel { outline: 2px solid #7fb0ff; outline-offset: 0; border-color: transparent; z-index: 1; }
+      .layer.mhov { outline: 2px dashed #ff5c7a; outline-offset: 0; z-index: 1; }
+      .layers-measure-svg { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+      .layers-measure-svg .ms-line { stroke: #ff5c7a; stroke-width: 1; }
+      .layers-measure-svg .ms-rect { fill: none; stroke: #ff5c7a; stroke-width: 1; stroke-dasharray: 4 3; }
+      .layers-measure-svg .ms-label {
+        fill: #ffb3c1; font: 600 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+        paint-order: stroke; stroke: rgba(13,15,18,.9); stroke-width: 3px;
+      }
+      .act.on { background: #1d2c40; border-color: #3a6fae; color: #cfe0ff; }
       .layers-hint {
         position: absolute; top: 50%; left: 0; right: 0; transform: translateY(-50%);
         text-align: center; color: #5d646e; font-size: 13px; pointer-events: none; padding: 0 24px;
@@ -977,6 +1032,8 @@ final class XPHttpLogServer: @unchecked Sendable {
       .props-swatch-fill { width: 100%; height: 100%; border-radius: 2px; }
       .props-bool-on { color: #6fd08c; font-weight: 600; }
       .props-bool-off { color: #8b929c; }
+      .props-spacing { padding-bottom: 0; }
+      .props-spacing:empty { display: none; }
 
       /* lightbox */
       #lightbox {
@@ -1140,6 +1197,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         <div class="layers-bar">
           <button class="act" id="layersRefresh" title="Re-capture">capture</button>
           <label class="layers-slider">explode<input id="layersExplode" type="range" min="0" max="1600" value="700"></label>
+          <button class="act" id="layersMeasureBtn" title="Measure distances between nodes">measure</button>
           <span class="layers-zoom">
             <button class="act act-icon" id="layersZoomOut" title="Zoom out"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg></button>
             <span class="layers-zoomval" id="layersZoomVal">100%</span>
@@ -1160,6 +1218,7 @@ final class XPHttpLogServer: @unchecked Sendable {
           <div class="layers-props" id="layersProps">
             <div class="props-empty" id="propsEmpty">Select a node to inspect its properties.</div>
             <div class="props-head hidden" id="propsHead"></div>
+            <div class="props-groups props-spacing" id="propsSpacing"></div>
             <div class="props-groups" id="propsGroups"></div>
           </div>
         </div>
@@ -1858,10 +1917,13 @@ final class XPHttpLogServer: @unchecked Sendable {
       const propsEmptyEl = document.getElementById('propsEmpty');
       const propsHeadEl = document.getElementById('propsHead');
       const propsGroupsEl = document.getElementById('propsGroups');
+      const propsSpacingEl = document.getElementById('propsSpacing');
+      const layersMeasureBtnEl = document.getElementById('layersMeasureBtn');
       let propsReqId = 0;     // bumped per request; stale responses are ignored
       let layersLoaded = false, layersData = null;
       let layRotX = -16, layRotY = 24, layExplode = 700, layFit = 1, layZoom = 1, layMaxOrder = 0;
       let layDown = null, layDragged = false, selectedNodeId = null;
+      let measureMode = false, measureHoverId = null, measureSavedCam = null, measureSvgEl = null;
       let layersLiveTimer = null, layersSig = '';   // live auto-refresh state
       const LAYERS_POLL_MS = 1500;
       const layerEls = {};    // id -> 3D layer div
@@ -1916,8 +1978,12 @@ final class XPHttpLogServer: @unchecked Sendable {
         if (layersLiveEl.checked) layersLiveTimer = setInterval(refreshLayersLive, LAYERS_POLL_MS);
       }
       function stopLayersLive() { if (layersLiveTimer) { clearInterval(layersLiveTimer); layersLiveTimer = null; } }
-      function flattenLayers(nodes, out) {
-        for (const n of nodes) { out.push(n); if (n.children && n.children.length) flattenLayers(n.children, out); }
+      function flattenLayers(nodes, out, parent) {
+        for (const n of nodes) {
+          n._parent = parent || null;
+          out.push(n);
+          if (n.children && n.children.length) flattenLayers(n.children, out, n);
+        }
         return out;
       }
       function shortCls(cls) {
@@ -1956,12 +2022,14 @@ final class XPHttpLogServer: @unchecked Sendable {
               d.style.height = (ih * layFit) + 'px';
               d.style.opacity = n.hidden ? 0.12 : Math.max(0.3, n.alpha);
               if (n.img && n.img.indexOf('data:image/') === 0) {
-                d.style.backgroundImage = 'url("' + n.img.replace(/["\\\\]/g, '\\$&') + '")';
+                d.style.backgroundImage = 'url("' + n.img.replace(/["\\\\]/g, '\\\\$&') + '")';
                 d.style.backgroundSize = (n.w * layFit) + 'px ' + (n.h * layFit) + 'px';
                 d.style.backgroundPosition = (-(ix - n.x) * layFit) + 'px ' + (-(iy - n.y) * layFit) + 'px';
               }
               d._order = order++;
               d.onclick = (e) => { e.stopPropagation(); if (layDragged) return; selectNode(n.id); };
+              d.onpointerenter = () => { if (measureMode) setMeasureHover(n.id); };
+              d.onpointerleave = () => { if (measureMode && measureHoverId === n.id) setMeasureHover(null); };
               layersSceneEl.appendChild(d);
               layerEls[n.id] = d;
             }
@@ -1984,6 +2052,9 @@ final class XPHttpLogServer: @unchecked Sendable {
         layersHintEl.classList.add('hidden');
         layersMetaEl.textContent = all.length + ' nodes · ' + Math.round(sw) + '×' + Math.round(sh);
         layersSig = computeLayersSig(layersData);   // mark what's currently shown, for live diffing
+        measureHoverId = null;
+        ensureMeasureSvg();
+        drawMeasure();
         applyLayerTransforms();
       }
       function applyLayerTransforms() {
@@ -1991,10 +2062,109 @@ final class XPHttpLogServer: @unchecked Sendable {
         // Spread by paint order (0..1), so occlusion matches the real screen and
         // the spacing is independent of how many nodes there are.
         for (const d of layersSceneEl.children) {
+          if (d._order === undefined) continue;   // measure overlay has no paint order
           const z = (d._order / layMaxOrder) * layExplode;
           d.style.transform = 'translateZ(' + z + 'px)';
         }
         layersZoomValEl.textContent = Math.round(layZoom * 100) + '%';
+      }
+
+      // ---- Measure mode (Figma-style redlines between two nodes) ----
+      // Distances are computed in screen points from the captured frames, so no
+      // extra capture round trip is needed; only drawing scales by layFit.
+      const SVG_NS = 'http://www.w3.org/2000/svg';
+      function svgChild(name, attrs) {
+        const el = document.createElementNS(SVG_NS, name);
+        for (const k in attrs) el.setAttribute(k, attrs[k]);
+        return el;
+      }
+      // Re-created on every buildLayers: the scene is wiped by innerHTML = ''.
+      // Lives inside the scene so it inherits the same scale/rotation transforms
+      // (measure mode forces the camera flat, so it stays a 2D overlay).
+      function ensureMeasureSvg() {
+        measureSvgEl = document.createElementNS(SVG_NS, 'svg');
+        measureSvgEl.setAttribute('class', 'layers-measure-svg');
+        measureSvgEl.style.width = layersSceneEl.style.width;
+        measureSvgEl.style.height = layersSceneEl.style.height;
+        layersSceneEl.appendChild(measureSvgEl);
+      }
+      function setMeasureHover(id) {
+        if (measureHoverId && layerEls[measureHoverId]) layerEls[measureHoverId].classList.remove('mhov');
+        measureHoverId = id;
+        if (id && id !== selectedNodeId && layerEls[id]) layerEls[id].classList.add('mhov');
+        drawMeasure();
+      }
+      // Figma's rules, simplified: disjoint on an axis → one edge-to-edge gap
+      // segment; overlapping/containing → the two edge-to-matching-edge insets.
+      function measureSegs(a, b) {
+        const segs = [];
+        const ax2 = a.x + a.w, ay2 = a.y + a.h, bx2 = b.x + b.w, by2 = b.y + b.h;
+        const overlapX = Math.min(ax2, bx2) > Math.max(a.x, b.x);
+        const overlapY = Math.min(ay2, by2) > Math.max(a.y, b.y);
+        const midY = overlapY ? (Math.max(a.y, b.y) + Math.min(ay2, by2)) / 2 : a.y + a.h / 2;
+        const midX = overlapX ? (Math.max(a.x, b.x) + Math.min(ax2, bx2)) / 2 : a.x + a.w / 2;
+        if (!overlapX) {
+          if (bx2 <= a.x) segs.push({ x1: bx2, y1: midY, x2: a.x, y2: midY });
+          else segs.push({ x1: ax2, y1: midY, x2: b.x, y2: midY });
+        } else {
+          segs.push({ x1: Math.min(a.x, b.x), y1: midY, x2: Math.max(a.x, b.x), y2: midY });
+          segs.push({ x1: Math.min(ax2, bx2), y1: midY, x2: Math.max(ax2, bx2), y2: midY });
+        }
+        if (!overlapY) {
+          if (by2 <= a.y) segs.push({ x1: midX, y1: by2, x2: midX, y2: a.y });
+          else segs.push({ x1: midX, y1: ay2, x2: midX, y2: b.y });
+        } else {
+          segs.push({ x1: midX, y1: Math.min(a.y, b.y), x2: midX, y2: Math.max(a.y, b.y) });
+          segs.push({ x1: midX, y1: Math.min(ay2, by2), x2: midX, y2: Math.max(ay2, by2) });
+        }
+        return segs.filter(s => Math.abs(s.x2 - s.x1) + Math.abs(s.y2 - s.y1) > 0.01);
+      }
+      function drawMeasure() {
+        if (!measureSvgEl) return;
+        while (measureSvgEl.firstChild) measureSvgEl.removeChild(measureSvgEl.firstChild);
+        if (!measureMode || !selectedNodeId || !measureHoverId || measureHoverId === selectedNodeId) return;
+        const a = treeRowEls[selectedNodeId] && treeRowEls[selectedNodeId]._node;
+        const b = treeRowEls[measureHoverId] && treeRowEls[measureHoverId]._node;
+        if (!a || !b) return;
+        measureSvgEl.appendChild(svgChild('rect', {
+          class: 'ms-rect', x: b.x * layFit, y: b.y * layFit, width: b.w * layFit, height: b.h * layFit,
+        }));
+        for (const s of measureSegs(a, b)) {
+          const horizontal = s.y1 === s.y2;
+          const len = Math.abs(s.x2 - s.x1) + Math.abs(s.y2 - s.y1);
+          measureSvgEl.appendChild(svgChild('line', {
+            class: 'ms-line', x1: s.x1 * layFit, y1: s.y1 * layFit, x2: s.x2 * layFit, y2: s.y2 * layFit,
+          }));
+          const label = svgChild('text', {
+            class: 'ms-label',
+            x: ((s.x1 + s.x2) / 2) * layFit + (horizontal ? 0 : 4),
+            y: ((s.y1 + s.y2) / 2) * layFit + (horizontal ? -4 : 3),
+          });
+          if (horizontal) label.setAttribute('text-anchor', 'middle');
+          label.textContent = fmt1(len);
+          measureSvgEl.appendChild(label);
+        }
+      }
+      function setMeasureMode(on) {
+        measureMode = on;
+        layersMeasureBtnEl.classList.toggle('on', on);
+        if (on) {
+          // Flatten the camera: measuring only makes sense in 2D, and it keeps
+          // the SVG overlay aligned with the slices.
+          measureSavedCam = { rotX: layRotX, rotY: layRotY, explode: layExplode, zoom: layZoom };
+          layRotX = 0; layRotY = 0; layExplode = 0;
+          layersExplodeEl.value = 0;
+        } else {
+          if (measureSavedCam) {
+            layRotX = measureSavedCam.rotX; layRotY = measureSavedCam.rotY;
+            layExplode = measureSavedCam.explode; layZoom = measureSavedCam.zoom;
+            layersExplodeEl.value = layExplode;
+            measureSavedCam = null;
+          }
+          setMeasureHover(null);
+        }
+        applyLayerTransforms();
+        drawMeasure();
       }
       // One selection model drives both the 3D slice and the tree row.
       function selectNode(id) {
@@ -2010,7 +2180,41 @@ final class XPHttpLogServer: @unchecked Sendable {
           + frame + ' · depth ' + n.depth + (n.hidden ? ' · hidden' : '') + '</div>';
         layersInfoEl.querySelector('.li-cls').textContent = n.cls + (n.label ? '  "' + n.label + '"' : '');
         layersInfoEl.classList.remove('hidden');
+        renderSpacing(n);
+        drawMeasure();
         loadNodeDetail(id);
+      }
+
+      // ---- Spacing (client-side, from captured frames) ----
+      // Gaps from the node to its parent's four edges — the "padding" a designer
+      // checks against a Figma redline. Frames are already in the hierarchy
+      // payload, so this works even when the node is no longer live on-device.
+      function renderSpacing(n) {
+        propsSpacingEl.innerHTML = '';
+        const p = n && n._parent;
+        if (!p) return;
+        const card = document.createElement('div'); card.className = 'props-group';
+        const head = document.createElement('div'); head.className = 'props-group-head';
+        const caret = document.createElement('span'); caret.className = 'pg-caret'; caret.textContent = '▼';
+        const title = document.createElement('span'); title.textContent = 'Spacing';
+        head.appendChild(caret); head.appendChild(title);
+        head.onclick = () => card.classList.toggle('collapsed');
+        const body = document.createElement('div'); body.className = 'props-group-body';
+        const rows = [
+          ['In parent', shortCls(p.cls)],
+          ['Left', fmt1(n.x - p.x)],
+          ['Top', fmt1(n.y - p.y)],
+          ['Right', fmt1((p.x + p.w) - (n.x + n.w))],
+          ['Bottom', fmt1((p.y + p.h) - (n.y + n.h))],
+        ];
+        for (const kv of rows) {
+          const row = document.createElement('div'); row.className = 'props-attr';
+          const k = document.createElement('div'); k.className = 'props-k'; k.textContent = kv[0];
+          const v = document.createElement('div'); v.className = 'props-v'; v.textContent = kv[1];
+          row.appendChild(k); row.appendChild(v); body.appendChild(row);
+        }
+        card.appendChild(head); card.appendChild(body);
+        propsSpacingEl.appendChild(card);
       }
 
       // ---- Properties panel ----
@@ -2019,6 +2223,7 @@ final class XPHttpLogServer: @unchecked Sendable {
       function clearProps() {
         propsReqId++;
         propsGroupsEl.innerHTML = '';
+        propsSpacingEl.innerHTML = '';
         propsHeadEl.textContent = '';
         propsHeadEl.classList.add('hidden');
         propsEmptyEl.textContent = 'Select a node to inspect its properties.';
@@ -2164,10 +2369,11 @@ final class XPHttpLogServer: @unchecked Sendable {
 
       function setZoom(z) { layZoom = Math.max(0.3, Math.min(5, z)); applyLayerTransforms(); }
       layersStageEl.addEventListener('pointerdown', (e) => {
-        layDown = { x: e.clientX, y: e.clientY }; layDragged = false; layersStageEl.classList.add('grabbing');
+        layDown = { x: e.clientX, y: e.clientY }; layDragged = false;
+        if (!measureMode) layersStageEl.classList.add('grabbing');
       });
       layersStageEl.addEventListener('pointermove', (e) => {
-        if (!layDown) return;
+        if (!layDown || measureMode) return;   // camera stays flat while measuring
         const dx = e.clientX - layDown.x, dy = e.clientY - layDown.y;
         if (Math.abs(dx) + Math.abs(dy) > 3) layDragged = true;
         layRotY += dx * 0.35; layRotX -= dy * 0.35;
@@ -2183,16 +2389,22 @@ final class XPHttpLogServer: @unchecked Sendable {
         if (layDragged || !selectedNodeId) return;
         if (layerEls[selectedNodeId]) layerEls[selectedNodeId].classList.remove('sel');
         if (treeRowEls[selectedNodeId]) treeRowEls[selectedNodeId].classList.remove('sel');
-        selectedNodeId = null; layersInfoEl.classList.add('hidden'); clearProps();
+        selectedNodeId = null; layersInfoEl.classList.add('hidden'); clearProps(); drawMeasure();
       });
       // Wheel zooms the scene.
       layersStageEl.addEventListener('wheel', (e) => { e.preventDefault(); setZoom(layZoom * (1 - e.deltaY * 0.0015)); }, { passive: false });
-      layersExplodeEl.oninput = () => { layExplode = +layersExplodeEl.value; applyLayerTransforms(); };
+      layersExplodeEl.oninput = () => {
+        if (measureMode) { layersExplodeEl.value = 0; return; }
+        layExplode = +layersExplodeEl.value; applyLayerTransforms();
+      };
       document.getElementById('layersZoomIn').onclick = () => setZoom(layZoom * 1.2);
       document.getElementById('layersZoomOut').onclick = () => setZoom(layZoom / 1.2);
       document.getElementById('layersReset').onclick = () => {
+        if (measureMode) setMeasureMode(false);
         layRotX = -16; layRotY = 24; layExplode = 700; layZoom = 1; layersExplodeEl.value = 700; applyLayerTransforms();
       };
+      layersMeasureBtnEl.onclick = () => setMeasureMode(!measureMode);
+      document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && measureMode) setMeasureMode(false); });
       document.getElementById('layersRefresh').onclick = () => loadLayers(true);
       layersLiveEl.onchange = () => { if (activeView === 'layers') startLayersLive(); };
       // Resize the hierarchy panel by dragging the divider.
@@ -2535,6 +2747,7 @@ final class XPHttpLogServer: @unchecked Sendable {
 func xpLocalWiFiAddress() -> String? {
     var ifaddr: UnsafeMutablePointer<ifaddrs>?
     guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
+
     defer { freeifaddrs(ifaddr) }
 
     var candidate: String?
@@ -2549,6 +2762,7 @@ func xpLocalWiFiAddress() -> String? {
         var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
         let r = getnameinfo(addr, socklen_t(addr.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
         guard r == 0 else { continue }
+
         let ip = String(cString: host)
 
         // Prefer the WiFi interfaces; fall back to any non-loopback IPv4.
