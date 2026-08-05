@@ -1198,7 +1198,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         <div class="layers-bar">
           <button class="act" id="layersRefresh" title="Re-capture">capture</button>
           <label class="layers-slider">explode<input id="layersExplode" type="range" min="0" max="1600" value="700"></label>
-          <button class="act" id="layersMeasureBtn" title="Measure distances between nodes">measure</button>
+          <button class="act" id="layersMeasureBtn" title="Flatten the camera for measuring">measure</button>
           <span class="layers-zoom">
             <button class="act act-icon" id="layersZoomOut" title="Zoom out"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg></button>
             <span class="layers-zoomval" id="layersZoomVal">100%</span>
@@ -2065,6 +2065,7 @@ final class XPHttpLogServer: @unchecked Sendable {
           const z = (d._order / layMaxOrder) * layExplode;
           d.style.transform = 'translateZ(' + z + 'px)';
         }
+        positionMeasureSvg();
         layersZoomValEl.textContent = Math.round(layZoom * 100) + '%';
       }
 
@@ -2134,10 +2135,19 @@ final class XPHttpLogServer: @unchecked Sendable {
         label.textContent = fmt1(len);
         measureSvgEl.appendChild(label);
       }
+      // The overlay lives on the selected slice's 3D plane so redlines stay
+      // aligned even when the scene is rotated or exploded.
+      function positionMeasureSvg() {
+        if (!measureSvgEl) return;
+        const selEl = selectedNodeId && layerEls[selectedNodeId];
+        const z = selEl ? (selEl._order / layMaxOrder) * layExplode + 1 : 0;
+        measureSvgEl.style.transform = 'translateZ(' + z + 'px)';
+      }
       function drawMeasure() {
         if (!measureSvgEl) return;
         while (measureSvgEl.firstChild) measureSvgEl.removeChild(measureSvgEl.firstChild);
-        if (!measureMode || !selectedNodeId) return;
+        if (!selectedNodeId) return;
+        positionMeasureSvg();
         const a = treeRowEls[selectedNodeId] && treeRowEls[selectedNodeId]._node;
         if (!a) return;
         const hoverRow = measureHoverId && measureHoverId !== selectedNodeId && treeRowEls[measureHoverId];
@@ -2187,7 +2197,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         if (on && !selectedNodeId) {
           layersInfoEl.innerHTML = '<div class="li-meta"></div>';
           layersInfoEl.querySelector('.li-meta').textContent =
-            'measure: select a node to see its redlines, then hover another node for gaps';
+            'flat measuring view — select a node for redlines, hover another for gaps';
           layersInfoEl.classList.remove('hidden');
         }
         if (!on && !selectedNodeId) layersInfoEl.classList.add('hidden');
@@ -2416,12 +2426,12 @@ final class XPHttpLogServer: @unchecked Sendable {
         if (!measureMode) layersStageEl.classList.add('grabbing');
       });
       layersStageEl.addEventListener('pointermove', (e) => {
-        if (measureMode) {   // camera stays flat while measuring; pointer hovers measure
-          const over = pickNodeAt(e.clientX, e.clientY);
+        if (!layDown) {   // hovering (not dragging): measure against the selection
+          const over = selectedNodeId ? pickNodeAt(e.clientX, e.clientY) : null;
           setMeasureHover(over && over.id !== selectedNodeId ? over.id : null);
           return;
         }
-        if (!layDown) return;
+        if (measureMode) return;   // camera stays flat while measuring
         const dx = e.clientX - layDown.x, dy = e.clientY - layDown.y;
         if (Math.abs(dx) + Math.abs(dy) > 3) layDragged = true;
         layRotY += dx * 0.35; layRotX -= dy * 0.35;
@@ -2431,7 +2441,7 @@ final class XPHttpLogServer: @unchecked Sendable {
       });
       function endLayDrag() { layDown = null; layersStageEl.classList.remove('grabbing'); }
       layersStageEl.addEventListener('pointerup', endLayDrag);
-      layersStageEl.addEventListener('pointerleave', endLayDrag);
+      layersStageEl.addEventListener('pointerleave', () => { endLayDrag(); setMeasureHover(null); });
       layersStageEl.addEventListener('pointercancel', endLayDrag);
       // Pick the smallest visible slice under the cursor. The topmost element is
       // usually an invisible full-screen system window (UITextEffectsWindow,
