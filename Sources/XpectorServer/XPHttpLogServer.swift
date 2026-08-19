@@ -825,6 +825,10 @@ final class XPHttpLogServer: @unchecked Sendable {
       .hdr-k { color: #7fb0ff; width: 38%; font-weight: 500; overflow-wrap: anywhere; }
       .hdr-v { color: #b6bcc6; overflow-wrap: anywhere; }
       .hdr-empty { padding: 12px 14px; color: #5d646e; font-size: 12px; }
+      /* Form bodies: short field names, long values — give the value column the room. */
+      .kv-body .hdr-k { width: 22%; }
+      .kv-json { margin: 0; font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .kv-lines { white-space: pre-wrap; }
       /* JSON syntax highlight */
       .j-key { color: #7fb0ff; } .j-str { color: #3ddc84; } .j-num { color: #f5c451; }
       .j-bool { color: #c39bff; } .j-null { color: #ff6b61; }
@@ -1464,9 +1468,54 @@ final class XPHttpLogServer: @unchecked Sendable {
       hostfPop.onclick = (e) => e.stopPropagation();   // keep it open while toggling rows
       document.addEventListener('click', closeHostPopover);
       document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeHostPopover(); });
-      function pretty(body) {
+      // ---- structured values ----
+      // Percent-decode one x-www-form-urlencoded token ('+' means space there).
+      function formDecode(s) {
+        try { return decodeURIComponent(String(s).replace(/\\+/g, ' ')); } catch (_) { return String(s); }
+      }
+      // Split an application/x-www-form-urlencoded body into its fields, preserving wire
+      // order and keeping both the raw token and its decoded form. Returns null when the
+      // body isn't cleanly splittable, so callers can fall back to the raw blob.
+      function parseFormFields(body) {
+        if (!body) return null;
+        const out = [];
+        for (const seg of body.split('&')) {
+          const eq = seg.indexOf('=');
+          if (eq <= 0) return null;
+          const rawName = seg.slice(0, eq), raw = seg.slice(eq + 1);
+          out.push({ name: formDecode(rawName), rawName: rawName, value: formDecode(raw), raw: raw });
+        }
+        return out;
+      }
+      // Trust the Content-Type when it says so; otherwise fall back to the shape of the
+      // body, since plenty of servers send form payloads with no content type at all.
+      function isFormBody(contentType, body) {
+        if (/^application\\/x-www-form-urlencoded/i.test(contentType || '')) return true;
+        return !!body && /^[^&=\\s]+=[^&]*(&[^&=\\s]+=[^&]*)+$/.test(body);
+      }
+      function contentTypeOf(h) {
+        const k = Object.keys(h || {}).find(x => x.toLowerCase() === 'content-type');
+        return k ? h[k] : '';
+      }
+      // Pretty-printed JSON when the text parses as an object/array, null otherwise.
+      function asPrettyJSON(s) {
+        const t = String(s == null ? '' : s).trim();
+        if (!/^[[{]/.test(t)) return null;
+        try { return JSON.stringify(JSON.parse(t), null, 2); } catch (_) { return null; }
+      }
+      // Clipboard text for a body pane — mirrors what bodyNode puts on screen.
+      function bodyText(body, contentType) {
         if (!body) return '(empty)';
-        try { return JSON.stringify(JSON.parse(body), null, 2); } catch (_) { return body; }
+        const json = asPrettyJSON(body);
+        if (json !== null) return json;
+        if (isFormBody(contentType, body)) {
+          const fields = parseFormFields(body);
+          if (fields) return fields.map(f => {
+            const nested = asPrettyJSON(f.value);
+            return f.name + ' = ' + (nested === null ? f.value : nested);
+          }).join('\\n');
+        }
+        return body;
       }
       function headersText(h) {
         if (!h) return '(none)';
@@ -1480,21 +1529,44 @@ final class XPHttpLogServer: @unchecked Sendable {
         return String(name).split('-').map(p =>
           p ? p.charAt(0).toUpperCase() + p.slice(1).toLowerCase() : p).join('-');
       }
-      // Render headers as a Postman-style key/value table, sorted and canonically cased.
-      function headersTable(h) {
-        const keys = h ? Object.keys(h) : [];
-        if (!keys.length) {
-          const d = document.createElement('div'); d.className = 'hdr-empty'; d.textContent = '(none)'; return d;
+      // A value cell that unfolds structure: JSON is pretty-printed and highlighted,
+      // cookie-style '; ' lists get one entry per line, anything else stays plain text.
+      function valueCell(v) {
+        const td = document.createElement('td');
+        td.className = 'hdr-v';
+        const s = String(v == null ? '' : v);
+        const json = asPrettyJSON(s);
+        if (json !== null) {
+          const pre = document.createElement('pre');
+          pre.className = 'kv-json';
+          pre.innerHTML = highlightJSON(json);
+          td.appendChild(pre);
+        } else if (s.split(/;\\s+/).length > 2) {
+          td.className = 'hdr-v kv-lines';
+          td.textContent = s.split(/;\\s+/).join('\\n');
+        } else {
+          td.textContent = s;
         }
-        keys.sort((a, b) => canonHeader(a).localeCompare(canonHeader(b)));
-        const t = document.createElement('table'); t.className = 'hdr-table';
-        keys.forEach(k => {
+        return td;
+      }
+      // Postman-style key/value table, shared by the Headers and Body tabs.
+      function kvTable(rows, emptyText, cls) {
+        if (!rows.length) {
+          const d = document.createElement('div'); d.className = 'hdr-empty'; d.textContent = emptyText; return d;
+        }
+        const t = document.createElement('table'); t.className = 'hdr-table' + (cls ? ' ' + cls : '');
+        rows.forEach(r => {
           const tr = document.createElement('tr');
-          const tk = document.createElement('td'); tk.className = 'hdr-k'; tk.textContent = canonHeader(k);
-          const tv = document.createElement('td'); tv.className = 'hdr-v'; tv.textContent = h[k];
-          tr.appendChild(tk); tr.appendChild(tv); t.appendChild(tr);
+          const tk = document.createElement('td'); tk.className = 'hdr-k'; tk.textContent = r.k;
+          tr.appendChild(tk); tr.appendChild(valueCell(r.v)); t.appendChild(tr);
         });
         return t;
+      }
+      // Render headers as a key/value table, sorted and canonically cased.
+      function headersTable(h) {
+        const keys = Object.keys(h || {});
+        keys.sort((a, b) => canonHeader(a).localeCompare(canonHeader(b)));
+        return kvTable(keys.map(k => ({ k: canonHeader(k), v: h[k] })), '(none)');
       }
       function escapeHtml(s) {
         return s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -1510,12 +1582,18 @@ final class XPHttpLogServer: @unchecked Sendable {
           return '<span class="' + cls + '">' + m + '</span>';
         });
       }
-      // Body pane: highlighted JSON when parseable, plain text otherwise.
-      function bodyNode(body) {
+      // Body pane: a decoded key/value table for form bodies, highlighted JSON when the
+      // body parses as JSON, plain text otherwise.
+      function bodyNode(body, contentType) {
         const pre = document.createElement('pre'); pre.className = 'panel';
         if (!body) { pre.textContent = '(empty)'; return pre; }
-        try { pre.innerHTML = highlightJSON(JSON.stringify(JSON.parse(body), null, 2)); }
-        catch (_) { pre.textContent = body; }
+        const json = asPrettyJSON(body);
+        if (json !== null) { pre.innerHTML = highlightJSON(json); return pre; }
+        if (isFormBody(contentType, body)) {
+          const fields = parseFormFields(body);
+          if (fields) return kvTable(fields.map(f => ({ k: f.name, v: f.value })), '(empty)', 'kv-body');
+        }
+        pre.textContent = body;
         return pre;
       }
       const COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
@@ -1552,16 +1630,6 @@ final class XPHttpLogServer: @unchecked Sendable {
         }
         return fields;
       }
-      // Split an application/x-www-form-urlencoded body into its fields so each gets
-      // its own --data line. curl re-joins multiple --data with '&', so the bytes on
-      // the wire are identical. Returns null when the body isn't cleanly splittable,
-      // and the caller falls back to a single --data blob.
-      function splitFormFields(body) {
-        const segs = body.split('&');
-        if (segs.length < 2) return null;
-        for (const s of segs) if (!/^[^&=]+=[^&]*$/.test(s)) return null;
-        return segs;
-      }
       function buildCurl(net) {
         const parts = ['curl -sS'];
         const m = (net.method || 'GET').toUpperCase();
@@ -1586,9 +1654,20 @@ final class XPHttpLogServer: @unchecked Sendable {
           const fields = parseMultipartFields(body, boundaryMatch[1]);
           for (const f of fields) parts.push('-F ' + shellEscape(f.name + '=' + f.value));
         } else if (body) {
-          const fields = isForm ? splitFormFields(body) : null;
-          if (fields) for (const f of fields) parts.push('--data ' + shellEscape(f));
-          else parts.push('--data ' + shellEscape(body));
+          const fields = isForm ? parseFormFields(body) : null;
+          if (fields) {
+            for (const f of fields) {
+              // One --data* line per field: curl re-joins them with '&', so the request
+              // replays unchanged. Fields carrying percent-encoding switch to
+              // --data-urlencode, which shows the value as the JSON/text it really is and
+              // lets curl re-encode it on send. The only divergence is escaping — curl
+              // writes a space as '+' where this app writes %20 — and both decode to the
+              // same value under the form-urlencoded rules. The name stays raw: curl passes
+              // it through verbatim, so decoding it would put unescaped bytes on the wire.
+              if (f.value !== f.raw) parts.push('--data-urlencode ' + shellEscape(f.rawName + '=' + f.value));
+              else parts.push('--data ' + shellEscape(f.rawName + '=' + f.raw));
+            }
+          } else parts.push('--data ' + shellEscape(body));
         }
         // One argument per line, continued with a trailing backslash. Both built from
         // char codes rather than escape sequences: this source lives inside a Swift
@@ -1750,13 +1829,14 @@ final class XPHttpLogServer: @unchecked Sendable {
         if (net.error) stats.querySelector('.stat:last-child .value').textContent = net.error;
         wrap.appendChild(stats);
 
+        const reqCT = contentTypeOf(net.requestHeaders), resCT = contentTypeOf(net.responseHeaders);
         const reqSec = buildSection('Request', 'req', [
           { name: 'Headers', node: headersTable(net.requestHeaders), copy: headersText(net.requestHeaders) },
-          { name: 'Body', node: bodyNode(net.requestBodyPreview), copy: pretty(net.requestBodyPreview) }
+          { name: 'Body', node: bodyNode(net.requestBodyPreview, reqCT), copy: bodyText(net.requestBodyPreview, reqCT) }
         ], reqTab);
         const resSec = buildSection('Response', 'res', [
           { name: 'Headers', node: headersTable(net.responseHeaders), copy: headersText(net.responseHeaders) },
-          { name: 'Body', node: bodyNode(net.responseBodyPreview), copy: pretty(net.responseBodyPreview) }
+          { name: 'Body', node: bodyNode(net.responseBodyPreview, resCT), copy: bodyText(net.responseBodyPreview, resCT) }
         ], resTab);
 
         // cURL — reproduce the request from the terminal.
