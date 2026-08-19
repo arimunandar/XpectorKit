@@ -445,6 +445,24 @@ session.dataTask(with: URL(string: "https://api.example.com/data")!) { data, res
 }.resume()
 ```
 
+### Form bodies
+
+`application/x-www-form-urlencoded` payloads go over the wire percent-encoded, which
+turns a nested JSON field into an unreadable run of `%22`/`%7B`. Both viewers and the
+on-device inspector decode them for display:
+
+- **Body tab** — a key/value table, one row per field, with values that are themselves
+  JSON pretty-printed and syntax-highlighted in place. **Copy** yields the decoded table,
+  not the raw blob.
+- **Headers tab** — JSON-valued headers are pretty-printed and cookie-style `; ` lists
+  get one entry per line.
+- **cURL tab** — each field is its own line; fields carrying percent-encoding use
+  `--data-urlencode`, so the value reads as the JSON it is and curl re-encodes it on
+  send. The request still replays: the only divergence is that curl writes a space as
+  `+` where a `%20` was sent, and both decode to the same value.
+
+Bodies that aren't cleanly splittable fall back to the raw text, unchanged.
+
 ## WebSocket Capture
 
 `URLSessionWebSocketTask` bypasses `URLProtocol` entirely, so Xpector captures

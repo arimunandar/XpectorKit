@@ -180,12 +180,23 @@ struct XPNetworkEntryDetail: View {
                 .padding(.bottom, 16)
             }
         case 1:
-            XPBodyTab(title: "Request Body", text: entry.requestBodyPreview)
+            XPBodyTab(title: "Request Body", text: entry.requestBodyPreview, formFields: requestFormFields)
         case 2:
             XPBodyTab(title: "Response Body", text: entry.responseBodyPreview)
         default:
             XPBodyTab(title: "cURL", text: buildCurl(entry), isJSON: false, tint: XPTheme.orange)
         }
+    }
+
+    /// Decoded fields when the request body is an `application/x-www-form-urlencoded`
+    /// payload — `nil` for JSON and everything else, which the body tab renders as before.
+    private var requestFormFields: [XPFormField]? {
+        guard let body = entry.requestBodyPreview, !body.isEmpty,
+              !XPInspectorJSON.isLikelyJSON(body),
+              xpIsFormBody(contentType: entry.requestHeaders.first { $0.key.lowercased() == "content-type" }?.value,
+                           body: body)
+        else { return nil }
+        return xpParseFormFields(body)
     }
 
     private func headerText(_ headers: [String: String]) -> String? {
@@ -242,7 +253,7 @@ private struct XPHeaderList: View {
                 ForEach(headers.sorted { $0.key < $1.key }, id: \.key) { k, v in
                     VStack(alignment: .leading, spacing: 1) {
                         Text(k).font(.system(size: 11, weight: .semibold, design: .monospaced)).foregroundColor(XPTheme.txt)
-                        Text(v).font(.system(size: 11, design: .monospaced)).foregroundColor(XPTheme.txt2).textSelection(.enabled)
+                        Text(xpReadableValue(v)).font(.system(size: 11, design: .monospaced)).foregroundColor(XPTheme.txt2).textSelection(.enabled)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -257,8 +268,15 @@ private struct XPBodyTab: View {
     let title: String
     let text: String?
     var isJSON: Bool = true
+    var formFields: [XPFormField]? = nil
     var tint: Color? = nil
     @State private var copied = false
+
+    /// Copy what is on screen: the decoded table for a form body, the raw text otherwise.
+    private var copyText: String {
+        if let formFields { return XPInspectorJSON.formText(formFields) }
+        return text ?? ""
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -267,7 +285,7 @@ private struct XPBodyTab: View {
                 Spacer()
                 if let t = text, !t.isEmpty {
                     Button {
-                        UIPasteboard.general.string = t
+                        UIPasteboard.general.string = copyText
                         copied = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
                     } label: {
@@ -278,7 +296,8 @@ private struct XPBodyTab: View {
                 }
             }
             if let t = text, !t.isEmpty {
-                XPCodeView(source: t, isJSON: isJSON && XPInspectorJSON.isLikelyJSON(t), tint: tint)
+                XPCodeView(source: t, isJSON: isJSON && formFields == nil && XPInspectorJSON.isLikelyJSON(t),
+                           formFields: formFields, tint: tint)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(XPTheme.surface)
                     .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
@@ -296,6 +315,7 @@ private struct XPBodyTab: View {
 private struct XPCodeView: View {
     let source: String
     let isJSON: Bool
+    var formFields: [XPFormField]? = nil
     var tint: Color? = nil
     @State private var attributed: NSAttributedString?
 
@@ -315,11 +335,17 @@ private struct XPCodeView: View {
             guard attributed == nil else { return }
             let src = source
             let json = isJSON
+            let fields = formFields
             let fixed: UIColor? = tint.map { UIColor($0) }
             DispatchQueue.global(qos: .userInitiated).async {
-                let result = json
-                    ? XPInspectorJSON.attributedJSON(XPInspectorJSON.pretty(src))
-                    : XPInspectorJSON.attributedPlain(src, color: fixed)
+                let result: NSAttributedString
+                if let fields {
+                    result = XPInspectorJSON.attributedForm(fields)
+                } else if json {
+                    result = XPInspectorJSON.attributedJSON(XPInspectorJSON.pretty(src))
+                } else {
+                    result = XPInspectorJSON.attributedPlain(src, color: fixed)
+                }
                 DispatchQueue.main.async { self.attributed = result }
             }
         }
@@ -401,6 +427,32 @@ private enum XPInspectorJSON {
         return out
     }
 
+    /// Renders a form body as an aligned name/value table. A value that is itself JSON
+    /// gets pretty-printed and indented under its field name rather than left as one
+    /// percent-encoded run.
+    static func attributedForm(_ fields: [XPFormField]) -> NSAttributedString {
+        let out = NSMutableAttributedString()
+        let width = min(22, fields.map { $0.name.count }.max() ?? 0) + 2
+        for f in fields {
+            let name = f.name.padding(toLength: max(width, f.name.count + 2), withPad: " ", startingAt: 0)
+            out.append(NSAttributedString(string: name, attributes: [.font: codeFont, .foregroundColor: cKey]))
+            if isLikelyJSON(f.value) {
+                let pad = String(repeating: " ", count: name.count)
+                appendHighlighted(pretty(f.value).components(separatedBy: "\n").joined(separator: "\n" + pad), to: out)
+            } else {
+                out.append(NSAttributedString(string: f.value, attributes: [.font: codeFont, .foregroundColor: cStr]))
+            }
+            out.append(NSAttributedString(string: "\n", attributes: [.font: codeFont, .foregroundColor: cBase]))
+        }
+        return out
+    }
+
+    /// Plain-text mirror of `attributedForm`, for the copy button.
+    static func formText(_ fields: [XPFormField]) -> String {
+        fields.map { "\($0.name) = \(isLikelyJSON($0.value) ? pretty($0.value) : $0.value)" }
+            .joined(separator: "\n")
+    }
+
     static func attributedPlain(_ text: String, color: UIColor?) -> NSAttributedString {
         NSAttributedString(string: text, attributes: [.font: codeFont, .foregroundColor: color ?? cBase])
     }
@@ -429,6 +481,59 @@ private enum XPInspectorJSON {
                                           attributes: [.font: codeFont, .foregroundColor: cBase]))
         }
     }
+}
+
+// MARK: - Form bodies
+
+/// One field of an `application/x-www-form-urlencoded` body, kept both as it went over
+/// the wire (`rawName`/`raw`) and percent-decoded for display.
+private struct XPFormField {
+    let name: String
+    let rawName: String
+    let value: String
+    let raw: String
+}
+
+/// Percent-decodes one form token. `+` means space in a form body, unlike in a URL path.
+private func xpFormDecode(_ s: String) -> String {
+    s.replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? s
+}
+
+/// Splits an `application/x-www-form-urlencoded` body into its fields, preserving wire
+/// order. Returns `nil` when the body isn't cleanly splittable, so callers fall back to
+/// showing the raw blob.
+private func xpParseFormFields(_ body: String) -> [XPFormField]? {
+    guard !body.isEmpty else { return nil }
+    var out: [XPFormField] = []
+    for seg in body.components(separatedBy: "&") {
+        guard let eq = seg.firstIndex(of: "="), eq != seg.startIndex else { return nil }
+        let rawName = String(seg[..<eq])
+        let raw = String(seg[seg.index(after: eq)...])
+        out.append(XPFormField(name: xpFormDecode(rawName), rawName: rawName,
+                               value: xpFormDecode(raw), raw: raw))
+    }
+    return out
+}
+
+/// Trusts the Content-Type when it says so, and otherwise falls back to the shape of the
+/// body — plenty of servers send form payloads with no content type at all.
+private func xpIsFormBody(contentType: String?, body: String) -> Bool {
+    if contentType?.lowercased().hasPrefix("application/x-www-form-urlencoded") == true { return true }
+    let segs = body.components(separatedBy: "&")
+    guard segs.count > 1 else { return false }
+    for seg in segs {
+        guard let eq = seg.firstIndex(of: "="), eq != seg.startIndex else { return false }
+        if seg[..<eq].contains(where: { $0 == " " || $0 == "\n" || $0 == "\r" || $0 == "\t" }) { return false }
+    }
+    return true
+}
+
+/// Header values often carry structure — JSON payloads, cookie lists. Unfold those so
+/// they read as more than one long line.
+private func xpReadableValue(_ v: String) -> String {
+    if XPInspectorJSON.isLikelyJSON(v) { return XPInspectorJSON.pretty(v) }
+    let parts = v.components(separatedBy: "; ")
+    return parts.count > 2 ? parts.joined(separator: "\n") : v
 }
 
 // MARK: - cURL
@@ -479,9 +584,21 @@ private func buildCurl(_ e: XPNetworkEntry) -> String {
             parts.append("-F \(xpShellEscape("\(f.name)=\(f.value)"))")
         }
     } else if let b = e.requestBodyPreview, !b.isEmpty {
-        if let fields = isForm ? xpSplitFormFields(b) : nil {
+        if let fields = isForm ? xpParseFormFields(b) : nil {
             for f in fields {
-                parts.append("--data \(xpShellEscape(f))")
+                // One --data* line per field: curl re-joins them with '&', so the request
+                // replays unchanged. Fields carrying percent-encoding switch to
+                // --data-urlencode, which shows the value as the JSON/text it really is
+                // and lets curl re-encode it on send. The only divergence is escaping —
+                // curl writes a space as '+' where this app writes %20 — and both decode
+                // to the same value under the form-urlencoded rules. The name stays raw:
+                // curl passes it through verbatim, so decoding it would put unescaped
+                // bytes on the wire.
+                if f.value != f.raw {
+                    parts.append("--data-urlencode \(xpShellEscape("\(f.rawName)=\(f.value)"))")
+                } else {
+                    parts.append("--data \(xpShellEscape("\(f.rawName)=\(f.raw)"))")
+                }
             }
         } else {
             parts.append("--data \(xpShellEscape(b))")
@@ -490,20 +607,6 @@ private func buildCurl(_ e: XPNetworkEntry) -> String {
     // One argument per line, continued with a trailing backslash, so a long
     // request reads top-to-bottom instead of as one wrapped paragraph.
     return parts.joined(separator: " \\\n  ")
-}
-
-/// Splits an `application/x-www-form-urlencoded` body into its fields so each gets its
-/// own `--data` line. curl re-joins multiple `--data` with `&`, so the bytes on the wire
-/// are identical. Returns `nil` when the body isn't cleanly splittable, in which case the
-/// caller keeps it as a single `--data` blob.
-private func xpSplitFormFields(_ body: String) -> [String]? {
-    let segs = body.components(separatedBy: "&")
-    guard segs.count > 1 else { return nil }
-
-    for s in segs {
-        guard let eq = s.firstIndex(of: "="), eq != s.startIndex else { return nil }
-    }
-    return segs
 }
 
 private func xpShellEscape(_ s: String) -> String {
