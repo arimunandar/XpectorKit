@@ -143,8 +143,8 @@ extension XPHttpLogServer {
             readOnly: true,
             buffers: [
                 "logs": recentLogs().count,
-                "network": recentNetwork().count,
-                "ws": recentWS().count,
+                "network": recentNetwork(Int.max).count,
+                "ws": recentWS(Int.max).count,
                 "nav": recentNav().count,
                 "leaks": recentLeaks().count,
             ],
@@ -287,7 +287,7 @@ extension XPHttpLogServer {
         let minDuration = Double(request.string("minDuration") ?? "") ?? 0
         let failedOnly = request.bool("failedOnly", default: false)
 
-        var entries = recentNetwork()
+        var entries = recentNetwork(Int.max)
         if let methods {
             entries = entries.filter { methods.contains($0.method.lowercased()) }
         }
@@ -358,7 +358,7 @@ extension XPHttpLogServer {
             let bodyTruncated: Bool
         }
 
-        guard let entry = recentNetwork().first(where: { $0.id.uuidString.lowercased() == id.lowercased() }) else {
+        guard let entry = recentNetwork(Int.max).first(where: { $0.id.uuidString.lowercased() == id.lowercased() }) else {
             writeAgentError(fd, status: "404 Not Found",
                             message: "No request \(id) in the recent buffer — it may have been evicted.")
             return
@@ -403,7 +403,7 @@ extension XPHttpLogServer {
         let directions = request.set("direction")
         let needle = request.string("q")?.lowercased()
 
-        var events = recentWS()
+        var events = recentWS(Int.max)
         if let connection {
             events = events.filter { $0.connectionId.lowercased().hasPrefix(connection.lowercased()) }
         }
@@ -461,7 +461,7 @@ extension XPHttpLogServer {
         }
 
         let limit = request.int("limit", default: 200, min: 1, max: 2000)
-        let events = recentWS().filter { $0.connectionId.lowercased().hasPrefix(id.lowercased()) }
+        let events = recentWS(Int.max).filter { $0.connectionId.lowercased().hasPrefix(id.lowercased()) }
         guard !events.isEmpty else {
             writeAgentError(fd, status: "404 Not Found", message: "No socket matching \(id).")
             return
@@ -588,16 +588,17 @@ extension XPHttpLogServer {
         let limit = request.int("limit", default: 25, min: 1, max: 200)
         XPAgentCapture.find(
             query: query, classFilter: classFilter, limit: limit, options: options(from: request)
-        ) { [weak self] hits, note in
+        ) { [weak self] hits, note, primed in
             guard let self else { close(fd); return }
 
             guard request.wantsText else {
-                writeAgentJSON(fd, FindResult(ok: true, count: hits.count, note: note, items: hits))
+                writeAgentJSON(fd, FindResult(ok: true, count: hits.count, primed: primed, note: note, items: hits))
                 return
             }
 
             if hits.isEmpty {
                 var text = "no match for q=\"\(query)\"\(classFilter.map { " cls=\($0)" } ?? "")"
+                text += "\n\(Self.primedToken(primed))"
                 if let note { text += "\n\nnote: \(note)" }
                 writeAgentText(fd, text)
                 return
@@ -608,7 +609,7 @@ extension XPHttpLogServer {
                 let frame = "[\(Int(hit.frame[0])),\(Int(hit.frame[1])),\(Int(hit.frame[2])),\(Int(hit.frame[3]))]"
                 return "#\(hit.ref) \(hit.cls)\(text) \(frame)\(tap)\n    in: \(hit.path)"
             }
-            var text = "\(hits.count) match(es)\n\n" + lines.joined(separator: "\n")
+            var text = "\(hits.count) match(es)\n\(Self.primedToken(primed))\n\n" + lines.joined(separator: "\n")
             if let note { text += "\n\nnote: \(note)" }
             writeAgentText(fd, text)
         }
@@ -617,6 +618,7 @@ extension XPHttpLogServer {
     private struct FindResult: Encodable {
         let ok: Bool
         let count: Int
+        let primed: Bool
         let note: String?
         let items: [XPAgentCapture.Hit]
     }
@@ -699,7 +701,7 @@ extension XPHttpLogServer {
             .suffix(logLimit)
             .map { "\(Self.clock($0.timestamp)) \($0.category.rawValue.uppercased()) \(clip($0.message, to: 400).0)" }
 
-        let failures = recentNetwork()
+        let failures = recentNetwork(Int.max)
             .filter { $0.error != nil || $0.statusCode >= 400 || $0.statusCode == 0 }
             .suffix(networkLimit)
             .map { Failure(t: $0.timestamp, method: $0.method, status: $0.statusCode, url: $0.url, error: $0.error) }
@@ -845,7 +847,7 @@ extension XPHttpLogServer {
                 ? ", \(screen.droppedNodes) dropped — node budget hit, raise ?maxNodes="
                 : ", \(screen.droppedNodes) hidden/off-screen nodes omitted (?visibleOnly=0 to include)"
         }
-        var lines = [header]
+        var lines = [header, primedToken(screen.primed)]
         if let note = screen.note {
             lines.append("note: \(note)")
         }
@@ -873,6 +875,15 @@ extension XPHttpLogServer {
         lines.append("")
         lines.append("attributes for a node: GET /api/node/<ref>")
         return lines.joined(separator: "\n")
+    }
+
+    /// The `primed` signal in the text renderings — a bare, standalone token on
+    /// its own line, emitted for BOTH states so a consumer can distinguish
+    /// "not primed" from "old SDK that never reports it". Downstream tools match
+    /// on this literal string; it is frozen. The neighbouring `note:` prose is
+    /// not, and must not be parsed.
+    static func primedToken(_ primed: Bool) -> String {
+        primed ? "primed=true" : "primed=false"
     }
 
     private static func renderContext(_ context: XPAgentCapture.Context) -> String {
@@ -1003,8 +1014,8 @@ extension XPHttpLogServer {
     private func bufferCounts() -> [String: Int] {
         [
             "logs": recentLogs().count,
-            "network": recentNetwork().count,
-            "ws": recentWS().count,
+            "network": recentNetwork(Int.max).count,
+            "ws": recentWS(Int.max).count,
             "nav": recentNav().count,
             "leaks": recentLeaks().count,
         ]

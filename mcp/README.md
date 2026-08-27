@@ -108,8 +108,12 @@ out, and with its output redirected the prime fails silently. Confirm it landed
 by checking the note is gone.
 
 Measured on a SwiftUI list: 5 text nodes before, 30 after, still 30 once the
-driver was gone. The tools prepend a note while it applies, and that note
-disappears on its own once it works — so its presence means "not primed yet".
+driver was gone.
+
+Responses carry a **`primed`** boolean (`primed=true` / `primed=false` as a bare
+token on its own line in text output) saying whether the tree is built. That is
+the stable signal — the accompanying `note:` prose is not, and may be reworded.
+No `primed` field at all means an SDK older than 0.2.42: treat it as unknown.
 
 Unprimed, `xpector_screenshot` is the reliable way to read a SwiftUI screen.
 Class names, accessibility identifiers and UIKit text match normally either way.

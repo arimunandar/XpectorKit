@@ -11,6 +11,13 @@
 const BASE_PORTS = [47164, 47165, 47166, 47167, 47168, 47169];
 /** The viewer/agent-API port sits at `base + 101`. */
 const VIEWER_OFFSET = 101;
+/** Probe timeout while scanning candidate ports. */
+const PROBE_TIMEOUT_MS = 1_500;
+/**
+ * Read timeout for a located app. Generous enough for `/api/hierarchy`, which
+ * rasterizes on the main thread, but far short of a stall a user would notice.
+ */
+const READ_TIMEOUT_MS = 5_000;
 
 export interface Discovery {
   baseUrl: string;
@@ -85,7 +92,7 @@ export class XpectorClient {
       if (tried.includes(url)) continue;
       tried.push(url);
       try {
-        const response = await fetchWithTimeout(`${url}/api`, 1500);
+        const response = await fetchWithTimeout(`${url}/api`, PROBE_TIMEOUT_MS);
         if (!response.ok) continue;
 
         const body = (await response.json()) as any;
@@ -129,7 +136,12 @@ export class XpectorClient {
     }
 
     try {
-      const response = await fetchWithTimeout(url.toString(), 30_000);
+      // Deliberately short. A *suspended* app keeps its listener bound while its
+      // run loop is stopped, so the socket accepts and then goes silent — the
+      // failure looks like a hang, not a refusal. A generous read timeout turns
+      // that into a 30-second stall on every call; a short one fails fast and
+      // lets the rediscovery path below run.
+      const response = await fetchWithTimeout(url.toString(), READ_TIMEOUT_MS);
       if (response.status === 404 || response.ok) return response;
       if (response.status >= 500 && retry) throw new Error('retry');
       return response;

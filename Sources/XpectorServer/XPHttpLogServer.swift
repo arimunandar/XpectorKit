@@ -32,12 +32,18 @@ final class XPHttpLogServer: @unchecked Sendable {
     /// immediately sees history. Provided by `XpectorServer`, which owns the
     /// buffers + their locks. Network entries arrive already redacted.
     let recentLogs: () -> [XPLogEntry]
-    let recentNetwork: () -> [XPNetworkEntry]
+    /// Takes the maximum number of entries to return. The viewer's SSE replay
+    /// asks for a modest slice so a fresh browser is not flooded; the agent API
+    /// asks for the whole buffer, because a paged reader that is silently capped
+    /// reports `hasMore: false` while history it could have served sits
+    /// unreachable behind the cap.
+    let recentNetwork: (Int) -> [XPNetworkEntry]
     let recentLeaks: () -> [XPPerfEvent]
     let recentNav: () -> [XPNavEvent]
     /// Snapshot of recent WebSocket events (already redacted), replayed to a
     /// fresh viewer so its Sockets tab shows connection history immediately.
-    let recentWS: () -> [XPWSEvent]
+    /// Takes a maximum, for the same reason as `recentNetwork`.
+    let recentWS: (Int) -> [XPWSEvent]
     /// Captures the current screen as JPEG bytes on demand (for `GET /screen`).
     /// Returns nil if no screen is available. Provided by `XpectorServer`, which
     /// hops to the main thread for the UIKit snapshot.
@@ -71,10 +77,10 @@ final class XPHttpLogServer: @unchecked Sendable {
         port: UInt16,
         appName: String = "App",
         recentLogs: @escaping () -> [XPLogEntry],
-        recentNetwork: @escaping () -> [XPNetworkEntry] = { [] },
+        recentNetwork: @escaping (Int) -> [XPNetworkEntry] = { _ in [] },
         recentLeaks: @escaping () -> [XPPerfEvent] = { [] },
         recentNav: @escaping () -> [XPNavEvent] = { [] },
-        recentWS: @escaping () -> [XPWSEvent] = { [] },
+        recentWS: @escaping (Int) -> [XPWSEvent] = { _ in [] },
         currentScreenshot: @escaping () -> Data? = { nil },
         layersJSON: ((@escaping (Data?) -> Void) -> Void)? = nil,
         nodeDetailJSON: ((String, @escaping (Data?) -> Void) -> Void)? = nil,
@@ -526,6 +532,11 @@ final class XPHttpLogServer: @unchecked Sendable {
         // a write fails (client gone), which prunes it.
     }
 
+    /// How much history the browser viewer replays on connect. Smaller than the
+    /// buffers on purpose — a browser wants recent context, not everything.
+    static let viewerReplayNetworkLimit = 50
+    static let viewerReplayWSLimit = 200
+
     /// Replay recent history so a fresh viewer sees context immediately:
     /// logs first, then recent network requests (each as its named event).
     private func replayHistory(_ fd: Int32) {
@@ -534,7 +545,7 @@ final class XPHttpLogServer: @unchecked Sendable {
 
             if !writeChunk(fd, "data: \(json)\n\n") { return }
         }
-        for entry in recentNetwork() {
+        for entry in recentNetwork(Self.viewerReplayNetworkLimit) {
             guard let json = encode(entry) else { continue }
 
             if !writeChunk(fd, "event: net\ndata: \(json)\n\n") { return }
@@ -549,7 +560,7 @@ final class XPHttpLogServer: @unchecked Sendable {
 
             if !writeChunk(fd, "event: nav\ndata: \(json)\n\n") { return }
         }
-        for event in recentWS() {
+        for event in recentWS(Self.viewerReplayWSLimit) {
             guard let json = encode(event) else { continue }
 
             if !writeChunk(fd, "event: ws\ndata: \(json)\n\n") { return }

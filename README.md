@@ -434,6 +434,15 @@ a bare flag (`?failedOnly`).
 Timestamps are ISO-8601 with milliseconds. Errors answer
 `{"ok": false, "error": "…"}` with a matching HTTP status.
 
+`/api/hierarchy` and `/api/find` additionally carry **`primed`** — a boolean
+saying whether the app's accessibility tree has been built (see
+[below](#reading-swiftui-screens--prime-the-accessibility-tree)). In
+`?format=text` it renders as a bare `primed=true` / `primed=false` token on its
+own line, always present in both states. **This is the stable signal for tooling
+to key off — the neighbouring `note:` prose is not, and its wording may change
+between releases.** A response with no `primed` field at all is an SDK older than
+0.2.42: treat that as *unknown*, never as primed.
+
 ### Built for a context window
 
 Three properties make repeated polling affordable:
@@ -480,6 +489,29 @@ Frames are `[x, y, w, h]` in screen coordinates; `tap(x,y)` is the centre of a
 view an agent could plausibly tap (agents drive the taps out of band, via
 XCUITest or `simctl`). Refs come from the most recent `/api/hierarchy` or
 `/api/find` call and resolve through `/api/node/<ref>`.
+
+### How much history is kept
+
+The device keeps ring buffers, and a long session overruns them:
+
+| Endpoint | Entries retained | Configurable via |
+|---|---|---|
+| `/api/logs` | 100 | `config.logBufferSize` |
+| `/api/network` | 200 | — |
+| `/api/ws` | 400 | — |
+| `/api/nav` | 40 | — |
+| `/api/leaks` | 200 | — |
+
+The agent API reads the **whole** buffer; the browser viewer's SSE replay
+deliberately shows less, so a fresh page is not flooded. `total` and `hasMore`
+always describe the full buffer, so a capped page is visible rather than silent.
+
+**Poll during a long run rather than reading once at the end.** Buffers evict
+while you work, and the loss is bigger than the numbers suggest — a busy screen
+can turn over 200 requests in well under a minute. In one measured 40-second
+automated flow, a read taken immediately afterwards could only reach back 22
+seconds; polling throughout captured the whole run. Poll with `?since=<cursor>`
+and you keep everything at almost no context cost.
 
 ### Reading SwiftUI screens — prime the accessibility tree
 
@@ -546,6 +578,7 @@ way.
 | `/api/screen` returns 503 | `enableNavigationScreenshots` is off, or the app has no foreground screen. |
 | `/api/node/<ref>` returns 404 | The ref is stale or the view is gone. Re-run `/api/hierarchy` or `/api/find`. |
 | `/api/find` misses text that is on screen | The accessibility tree is not built yet — run `maestro --device <udid> hierarchy` once ([details](#reading-swiftui-screens--prime-the-accessibility-tree)). If it still misses, the row is virtualized below the fold; scroll it into range. |
+| Request hangs instead of failing | The app is **suspended** (backgrounded). Its listener stays bound while its run loop is stopped, so the socket accepts and then goes silent — it reads as a timeout, not a refusal. Foreground the app. Keep read timeouts short and rediscover rather than waiting it out. |
 | Port changes when a UI driver launches the app | `SIMCTL_CHILD_*` does not survive a driver's own launch. Set it on the simulator instead: `xcrun simctl spawn <device> launchctl setenv XPECTOR_PORT 48000`. |
 
 > **Security.** The agent API is read-only — no endpoint mutates the app — and

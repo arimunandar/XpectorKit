@@ -279,12 +279,12 @@ public final class XpectorServer: @unchecked Sendable {
                 recentLogs: { [weak self] in self?.getRecentLogEntries() ?? [] },
                 // Replay recent requests (redacted, like the live push) so a
                 // fresh viewer sees network history too.
-                recentNetwork: {
-                    XPNetworkCapture.shared.recentEntries(limit: 50).map(XPNetworkCapture.redactedEntry)
+                recentNetwork: { limit in
+                    XPNetworkCapture.shared.recentEntries(limit: limit)
                 },
                 recentLeaks: { XPInAppLeakStore.shared.entries() },
                 recentNav: { [weak self] in self?.getRecentNavEvents() ?? [] },
-                recentWS: { XPWebSocketCapture.shared.recentEvents(limit: 200) },
+                recentWS: { limit in XPWebSocketCapture.shared.recentEvents(limit: limit) },
                 currentScreenshot: screenshotProvider,
                 layersJSON: layersProvider,
                 nodeDetailJSON: nodeDetailProvider,
