@@ -184,6 +184,12 @@ enum XPAgentCapture {
         /// tree is a trustworthy answer to "what does the screen say".
         let textNodes: Int
         let swiftUIHosts: Int
+        /// Whether an accessibility client has built the app's accessibility
+        /// tree. Measured directly (see `harvestAccessibility`), not inferred.
+        /// While false, SwiftUI text is unreadable from the view tree; priming
+        /// once fixes it for the app's lifetime. This is the **stable** signal —
+        /// `note` is human prose whose wording may change.
+        let primed: Bool
         /// Set when the tree is unlikely to contain the screen's visible copy,
         /// naming the endpoint that will.
         let note: String?
@@ -203,7 +209,8 @@ enum XPAgentCapture {
                 // text means touching live views again — so hop back, collect,
                 // then convert on the encode queue.
                 DispatchQueue.main.async {
-                    let accessibility = harvestAccessibility(snapshot.windows)
+                    let harvested = harvestAccessibility(snapshot.windows)
+                    let accessibility = harvested.text
                     let screenBounds = XPRect(
                         x: 0, y: 0,
                         width: snapshot.screenSize.width, height: snapshot.screenSize.height
@@ -245,7 +252,8 @@ enum XPAgentCapture {
                             budgetExhausted: budgetExhausted,
                             textNodes: textNodes,
                             swiftUIHosts: swiftUIHosts,
-                            note: swiftUIHosts > 0 && textNodes < swiftUIHosts
+                            primed: harvested.axTreeBuilt,
+                            note: !harvested.axTreeBuilt && swiftUIHosts > 0
                                 ? "SwiftUI text is missing from this tree because the accessibility tree has not been built. Attach an accessibility client ONCE to fix it for the rest of the app's lifetime — e.g. `maestro --device <udid> hierarchy`, or any XCUITest run. This note disappears once that works. Until then, read /api/screen. Note that SwiftUI List/LazyStack cells below the fold have no view at all until scrolled into range, so they stay unmatchable either way."
                                 : nil,
                             windows: windows
@@ -284,13 +292,22 @@ enum XPAgentCapture {
     /// One thing priming does *not* fix: SwiftUI `List` and lazy stacks
     /// virtualize, so rows below the fold have no view to find at all. Scroll
     /// them into range first.
-    private static func harvestAccessibility(_ windows: [XPViewNode]) -> [UUID: String] {
+    private static func harvestAccessibility(_ windows: [XPViewNode]) -> (text: [UUID: String], axTreeBuilt: Bool) {
         dispatchPrecondition(condition: .onQueue(.main))
         var out: [UUID: String] = [:]
+        // Whether ANY view exposes accessibility elements. This is the direct
+        // measurement behind `primed` — an unprimed app answers nil/0 for every
+        // view in the tree, so a single positive answer anywhere proves a client
+        // has built it. Inferring it from text coverage instead would misreport
+        // pure-UIKit screens, which have readable text and no AX tree at all.
+        var axTreeBuilt = false
 
         func walk(_ node: XPViewNode) {
             defer { node.children.forEach(walk) }
             guard let view = XPHierarchyCapture.lookupView(node.id) else { return }
+
+            let elementCount = view.accessibilityElements?.count ?? view.accessibilityElementCount()
+            if elementCount > 0 { axTreeBuilt = true }
             guard nonEmpty(node.textContent) == nil, nonEmpty(node.accessibilityLabel) == nil else { return }
 
             var parts: [String] = []
@@ -321,7 +338,7 @@ enum XPAgentCapture {
         }
 
         windows.forEach(walk)
-        return out
+        return (out, axTreeBuilt)
     }
 
     /// Recursively converts one `XPViewNode` subtree, applying the visibility
@@ -502,10 +519,10 @@ enum XPAgentCapture {
         classFilter: String?,
         limit: Int,
         options: Options,
-        completion: @escaping ([Hit], String?) -> Void
+        completion: @escaping ([Hit], String?, Bool) -> Void
     ) {
         hierarchy(options) { screen in
-            guard let screen else { completion([], nil); return }
+            guard let screen else { completion([], nil, false); return }
 
             let needle = query.lowercased()
             let classNeedle = classFilter?.lowercased()
@@ -549,7 +566,7 @@ enum XPAgentCapture {
             screen.windows.forEach { walk($0, path: []) }
             // Pass the capture's note through: on a SwiftUI screen an empty
             // result means "not in the view tree", not "not on screen".
-            completion(hits, screen.note)
+            completion(hits, screen.note, screen.primed)
         }
     }
 

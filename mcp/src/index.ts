@@ -168,7 +168,7 @@ server.registerTool(
     description:
       'The live view tree with frames, tap points and layout warnings — pixels stripped and wrapper views collapsed so it fits in context. ' +
       'Use it to understand screen structure or chase a layout bug. ' +
-      'On SwiftUI screens the text is missing until the accessibility tree is built — attach an accessibility client once (`maestro --device <udid> hierarchy`, or any XCUITest run) and it stays fixed for the rest of the app run. The response says so while it applies. List rows below the fold have no view until scrolled into range.',
+      'On SwiftUI screens the text is missing until the accessibility tree is built — attach an accessibility client once (`maestro --device <udid> hierarchy`, or any XCUITest run) and it stays fixed for the rest of the app run. The response carries `primed=false` while it applies. List rows below the fold have no view until scrolled into range.',
     inputSchema: {
       maxNodes: z.number().int().min(1).max(5000).optional().describe('Node budget (default 400).'),
       maxDepth: z.number().int().min(1).max(200).optional().describe('Maximum tree depth (default 24).'),
@@ -187,7 +187,7 @@ server.registerTool(
     description:
       'Find views by visible text, accessibility label or identifier, or class name — with each hit\'s frame, tap point and ancestor chain. ' +
       'Cheaper than pulling the whole hierarchy when you only need to locate one element. ' +
-      'On SwiftUI screens a text query misses copy that is genuinely on screen until the accessibility tree is built — attach an accessibility client once (`maestro --device <udid> hierarchy`, or any XCUITest run) to fix it for the rest of the app run. A miss is not proof the text is absent; the response says so while it applies.',
+      'On SwiftUI screens a text query misses copy that is genuinely on screen until the accessibility tree is built — attach an accessibility client once (`maestro --device <udid> hierarchy`, or any XCUITest run) to fix it for the rest of the app run. A miss is not proof the text is absent; the response carries `primed=false` while it applies.',
     inputSchema: {
       q: z.string().optional().describe('Case-insensitive substring to match.'),
       cls: z.string().optional().describe('Restrict to views whose class name contains this.'),
