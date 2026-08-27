@@ -89,15 +89,34 @@ would discard. Two habits keep it cheap:
   `cursor` returns only what happened since, so following a running app costs
   almost nothing per call.
 
-### SwiftUI text
+### SwiftUI text — prime the accessibility tree
 
 SwiftUI draws `Text` into its hosting view's display list rather than into child
 views, and iOS only builds the accessibility tree that would expose that text
-when an assistive client is attached. So on a SwiftUI screen the visible copy is
-genuinely **not in the view hierarchy** — `xpector_find` can miss a label that is
-plainly on screen. The tools say so when that applies; `xpector_screenshot` is
-the reliable way to read a SwiftUI screen. UIKit text, accessibility identifiers,
-and class names are matched normally.
+once an accessibility client attaches. Until then `xpector_find` can miss a label
+that is plainly on screen.
+
+Attaching a client **once** fixes it for the rest of the app's run — the tree
+stays built after the client detaches:
+
+```bash
+maestro --device <simulator-udid> hierarchy > /dev/null   # or any XCUITest run
+```
+
+Pass `--device` explicitly — with more than one device connected Maestro errors
+out, and with its output redirected the prime fails silently. Confirm it landed
+by checking the note is gone.
+
+Measured on a SwiftUI list: 5 text nodes before, 30 after, still 30 once the
+driver was gone. The tools prepend a note while it applies, and that note
+disappears on its own once it works — so its presence means "not primed yet".
+
+Unprimed, `xpector_screenshot` is the reliable way to read a SwiftUI screen.
+Class names, accessibility identifiers and UIKit text match normally either way.
+
+**Priming does not defeat virtualization.** SwiftUI `List` and lazy stacks only
+create views near the viewport, so rows below the fold have no view to find —
+primed or not. Scroll first. A miss is never by itself proof the text is absent.
 
 ## Development
 

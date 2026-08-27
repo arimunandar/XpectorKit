@@ -481,25 +481,59 @@ view an agent could plausibly tap (agents drive the taps out of band, via
 XCUITest or `simctl`). Refs come from the most recent `/api/hierarchy` or
 `/api/find` call and resolve through `/api/node/<ref>`.
 
-### Known limitation — SwiftUI text
+### Reading SwiftUI screens — prime the accessibility tree
 
 SwiftUI draws `Text` into its hosting view's display list rather than into child
-views, and iOS only builds the accessibility tree that would expose that text
-when an assistive client is attached. With none running,
-`accessibilityElements` is nil and `accessibilityElementCount()` is 0 across the
-whole app, and there is no public API to force it.
+views, so a whole screen of copy sits inside one `CellHostingView` with no child
+view to read. UIKit *does* expose that copy — through the accessibility tree —
+but only builds that tree once an accessibility client attaches. With none
+running, `accessibilityElements` is nil and `accessibilityElementCount()` is `0`
+across the entire app, and nothing inside the process can force it.
 
-So on a SwiftUI screen, most of the visible copy is **genuinely absent from the
-view hierarchy** — `/api/find` can miss a label that is plainly on screen, and a
-miss there does not mean the text is not displayed. Responses say so when it
-applies. What still works:
+**It can be forced from outside, once, and it sticks.** Attaching any
+accessibility client builds the tree, and it stays built after that client
+detaches — for the rest of the app's lifetime:
 
-- **`/api/screen`** is the reliable way to read a SwiftUI screen. Multimodal
-  agents read it directly.
-- **Class names, accessibility identifiers and any UIKit text** (nav bars, tab
-  bars, `UILabel`s) match normally.
-- Views carrying an explicit `.accessibilityLabel(_:)` are picked up when the
-  system exposes them.
+```bash
+maestro --device <simulator-udid> hierarchy > /dev/null
+```
+
+That attaches XCUITest, dumps, and detaches — the tree stays built. Any XCUITest
+run does the same. Pass `--device` explicitly: with more than one device
+connected Maestro exits with *"Multiple devices connected"*, and if you have
+redirected its output the prime fails silently.
+
+Measured on a SwiftUI list screen:
+
+| | `textNodes` | `/api/find?q=Fire%20all` |
+|---|---|---|
+| Fresh launch, no client ever attached | 5 | no match |
+| After one `maestro hierarchy` | **30** | `CellHostingView "Fire all sample requests" tap(201,668)` |
+| 5s later, client long gone | **30** | still matches |
+
+So the practical recipe for any agent or automation flow is **prime once, then
+read freely**:
+
+```bash
+maestro --device "$UDID" hierarchy > /dev/null       # 1. prime (once per app run)
+curl '.../api/find?q=Continue&format=text'           # 2. now reliable
+```
+
+To confirm the prime landed, check that the `note:` line is gone rather than
+trusting the command's exit status.
+
+Until you do, `/api/hierarchy` and `/api/find` prepend a `note:` explaining it,
+and that note **disappears on its own** once text coverage improves — so its
+presence is a usable signal for *"not primed yet"*. Unprimed, `/api/screen`
+remains the reliable way to read a SwiftUI screen, and class names, accessibility
+identifiers and UIKit text (nav bars, tab bars, `UILabel`s) match normally either
+way.
+
+> **Priming does not defeat virtualization.** SwiftUI `List` and lazy stacks only
+> create views for rows near the viewport, so anything below the fold has no view
+> to find — primed or not, and regardless of `?visibleOnly=0`. Scroll it into
+> range first. A `/api/find` miss is never by itself proof that text is not in
+> the app.
 
 ### Troubleshooting
 
@@ -511,6 +545,8 @@ applies. What still works:
 | Physical device unreachable | Loopback probing only covers the Simulator. Set `XPECTOR_URL` to the device's LAN address. |
 | `/api/screen` returns 503 | `enableNavigationScreenshots` is off, or the app has no foreground screen. |
 | `/api/node/<ref>` returns 404 | The ref is stale or the view is gone. Re-run `/api/hierarchy` or `/api/find`. |
+| `/api/find` misses text that is on screen | The accessibility tree is not built yet — run `maestro --device <udid> hierarchy` once ([details](#reading-swiftui-screens--prime-the-accessibility-tree)). If it still misses, the row is virtualized below the fold; scroll it into range. |
+| Port changes when a UI driver launches the app | `SIMCTL_CHILD_*` does not survive a driver's own launch. Set it on the simulator instead: `xcrun simctl spawn <device> launchctl setenv XPECTOR_PORT 48000`. |
 
 > **Security.** The agent API is read-only — no endpoint mutates the app — and
 > sits behind exactly the same trust boundary as the browser viewer: same LAN,

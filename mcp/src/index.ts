@@ -168,7 +168,7 @@ server.registerTool(
     description:
       'The live view tree with frames, tap points and layout warnings — pixels stripped and wrapper views collapsed so it fits in context. ' +
       'Use it to understand screen structure or chase a layout bug. ' +
-      'Note: on SwiftUI screens the visible text is drawn into the hosting view and is NOT in this tree; the response says so when that applies, and xpector_screenshot is the way to read that text.',
+      'On SwiftUI screens the text is missing until the accessibility tree is built — attach an accessibility client once (`maestro --device <udid> hierarchy`, or any XCUITest run) and it stays fixed for the rest of the app run. The response says so while it applies. List rows below the fold have no view until scrolled into range.',
     inputSchema: {
       maxNodes: z.number().int().min(1).max(5000).optional().describe('Node budget (default 400).'),
       maxDepth: z.number().int().min(1).max(200).optional().describe('Maximum tree depth (default 24).'),
@@ -187,7 +187,7 @@ server.registerTool(
     description:
       'Find views by visible text, accessibility label or identifier, or class name — with each hit\'s frame, tap point and ancestor chain. ' +
       'Cheaper than pulling the whole hierarchy when you only need to locate one element. ' +
-      'On SwiftUI screens a text query can miss copy that is genuinely on screen; the response says so when that applies.',
+      'On SwiftUI screens a text query misses copy that is genuinely on screen until the accessibility tree is built — attach an accessibility client once (`maestro --device <udid> hierarchy`, or any XCUITest run) to fix it for the rest of the app run. A miss is not proof the text is absent; the response says so while it applies.',
     inputSchema: {
       q: z.string().optional().describe('Case-insensitive substring to match.'),
       cls: z.string().optional().describe('Restrict to views whose class name contains this.'),
@@ -224,7 +224,7 @@ server.registerTool(
   {
     title: 'Screenshot the app',
     description:
-      'The current screen as an image. This is the reliable way to read what a SwiftUI screen says, since SwiftUI text does not appear in the view hierarchy.',
+      'The current screen as an image. Always reflects what is actually displayed, which makes it the fallback for reading a SwiftUI screen whose accessibility tree has not been built yet.',
     inputSchema: {},
   },
   guard(async () => {
