@@ -13,15 +13,15 @@ import XpectorKit
 /// inherits the SDK's existing trust model: same LAN, DEBUG-gated, fails closed
 /// in Release. It is read-only — it never accepts commands.
 final class XPHttpLogServer: @unchecked Sendable {
-    private let port: UInt16
+    let port: UInt16
     /// Host app's display name, shown in the viewer header so the operator
     /// knows which app they're looking at. Injected into the page at serve time.
-    private let appName: String
+    let appName: String
     private var serverFd: Int32 = -1
     private let lock = NSLock()
     /// Serializes writes to SSE clients; separate from `lock` so a slow socket
     /// write never blocks the accept loop or membership reads.
-    private let writeLock = NSLock()
+    let writeLock = NSLock()
     private var running = false
 
     /// Open SSE client sockets. Each `GET /stream` adds its fd here; a failed
@@ -31,22 +31,22 @@ final class XPHttpLogServer: @unchecked Sendable {
     /// Snapshot accessors for the recent buffers, so a freshly-connected viewer
     /// immediately sees history. Provided by `XpectorServer`, which owns the
     /// buffers + their locks. Network entries arrive already redacted.
-    private let recentLogs: () -> [XPLogEntry]
-    private let recentNetwork: () -> [XPNetworkEntry]
-    private let recentLeaks: () -> [XPPerfEvent]
-    private let recentNav: () -> [XPNavEvent]
+    let recentLogs: () -> [XPLogEntry]
+    let recentNetwork: () -> [XPNetworkEntry]
+    let recentLeaks: () -> [XPPerfEvent]
+    let recentNav: () -> [XPNavEvent]
     /// Snapshot of recent WebSocket events (already redacted), replayed to a
     /// fresh viewer so its Sockets tab shows connection history immediately.
-    private let recentWS: () -> [XPWSEvent]
+    let recentWS: () -> [XPWSEvent]
     /// Captures the current screen as JPEG bytes on demand (for `GET /screen`).
     /// Returns nil if no screen is available. Provided by `XpectorServer`, which
     /// hops to the main thread for the UIKit snapshot.
-    private let currentScreenshot: () -> Data?
+    let currentScreenshot: () -> Data?
     /// Captures the live view hierarchy as compact JSON (per-component "solo"
     /// slices + frames) for the Layers tab's exploded 3D view. Asynchronous — it
     /// hops to the main thread to rasterize, then encodes off-main. Nil disables
     /// the `/hierarchy` endpoint (e.g. when navigation screenshots are off).
-    private let layersJSON: ((@escaping (Data?) -> Void) -> Void)?
+    let layersJSON: ((@escaping (Data?) -> Void) -> Void)?
     /// Builds one live view's grouped attributes as JSON for the Layers tab's
     /// Properties panel, keyed by node UUID. Asynchronous — it hops to the main
     /// thread to look the view up, then encodes off-main. A `nil` payload means
@@ -60,7 +60,7 @@ final class XPHttpLogServer: @unchecked Sendable {
 
     private var keepaliveTimer: DispatchSourceTimer?
 
-    private let encoder: JSONEncoder = {
+    let encoder: JSONEncoder = {
         let e = JSONEncoder()
         // Milliseconds-since-epoch is clean to consume from JS (`new Date(ms)`).
         e.dateEncodingStrategy = .millisecondsSince1970
@@ -213,7 +213,7 @@ final class XPHttpLogServer: @unchecked Sendable {
 
     /// Writes all bytes, retrying partial sends. Returns false if the peer is
     /// gone (so the caller can drop it).
-    private func writeAll(_ fd: Int32, _ bytes: [UInt8]) -> Bool {
+    func writeAll(_ fd: Int32, _ bytes: [UInt8]) -> Bool {
         bytes.withUnsafeBytes { buf in
             var sent = 0
             guard let base = buf.baseAddress else { return bytes.isEmpty }
@@ -290,7 +290,16 @@ final class XPHttpLogServer: @unchecked Sendable {
     // MARK: - HTTP
 
     private func handleClient(_ fd: Int32) {
-        guard let path = readRequestPath(fd) else { close(fd); return }
+        guard let request = readRequestPath(fd) else { close(fd); return }
+
+        let path = request.path
+
+        // Agent API — machine-readable JSON mirrors of everything the viewer
+        // shows, with cursors, filters and token budgets. See XPAgentAPI.swift.
+        if path == "/api" || path.hasPrefix("/api/") {
+            serveAgentAPI(fd, request)
+            return
+        }
 
         // Per-node routes: "/node/<uuid>" (attributes JSON) and
         // "/node/<uuid>/image" (group PNG). UUIDs are ASCII so the bare path
@@ -440,7 +449,7 @@ final class XPHttpLogServer: @unchecked Sendable {
     }
 
     /// Reads the request line + headers up to `\r\n\r\n` and returns the path.
-    private func readRequestPath(_ fd: Int32) -> String? {
+    private func readRequestPath(_ fd: Int32) -> XPHttpRequest? {
         var data = Data()
         var byte: UInt8 = 0
         // Bound the header read so an unauthenticated peer can't stream
@@ -457,16 +466,41 @@ final class XPHttpLogServer: @unchecked Sendable {
         }
         guard let head = String(data: data, encoding: .utf8) else { return nil }
 
-        // Request line: "GET /path HTTP/1.1"
+        // Request line: "GET /path?query HTTP/1.1"
         let headLines = head.split(separator: "\r\n", maxSplits: 1, omittingEmptySubsequences: false)
         guard let firstLine = headLines.first else { return nil }
 
         let parts = firstLine.split(separator: " ")
         guard parts.count >= 2, parts[0] == "GET" else { return nil }
 
-        // Strip any query string — we route on the bare path.
-        let rawPath = String(parts[1])
-        return String(rawPath.split(separator: "?", maxSplits: 1).first ?? "")
+        // Split path from query. Viewer routes ignore the query; the agent API
+        // (`/api/…`) reads it for filters, cursors and limits.
+        let rawTarget = String(parts[1])
+        let split = rawTarget.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        let path = String(split.first ?? "")
+        let query = split.count > 1 ? Self.parseQuery(String(split[1])) : [:]
+        return XPHttpRequest(path: path, query: query)
+    }
+
+    /// Parses `a=1&b=hello%20world` into a dictionary, percent-decoding both
+    /// sides and treating `+` as a space (form encoding). A bare `flag` (no
+    /// `=`) becomes `flag: ""`, which the agent API reads as "present".
+    private static func parseQuery(_ raw: String) -> [String: String] {
+        var out: [String: String] = [:]
+        for pair in raw.split(separator: "&", omittingEmptySubsequences: true) {
+            let kv = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard let rawKey = kv.first, !rawKey.isEmpty else { continue }
+
+            let key = percentDecode(String(rawKey))
+            let value = kv.count > 1 ? percentDecode(String(kv[1])) : ""
+            out[key] = value
+        }
+        return out
+    }
+
+    private static func percentDecode(_ s: String) -> String {
+        s.replacingOccurrences(of: "+", with: " ").removingPercentEncoding
+            ?? s.replacingOccurrences(of: "+", with: " ")
     }
 
     private func serveStream(_ fd: Int32) {
@@ -563,7 +597,7 @@ final class XPHttpLogServer: @unchecked Sendable {
         close(fd)
     }
 
-    private func writeAndClose(_ fd: Int32, _ response: String) {
+    func writeAndClose(_ fd: Int32, _ response: String) {
         writeLock.lock()
         _ = writeAll(fd, Array(response.utf8))
         writeLock.unlock()

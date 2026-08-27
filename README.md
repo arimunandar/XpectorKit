@@ -2,10 +2,11 @@
 
 The iOS SDK for [Xpector](https://github.com/arimunandar/xpector) — a real-time iOS debugging tool. Drop it into any app and instantly stream logs, network traffic, view hierarchy, navigation flow, performance metrics, and more to the Xpector Mac app — **or** watch them live in any browser (no Mac required).
 
-Two ways to use it:
+Three ways to use it:
 
 1. **Mac app** — connect over USB/WiFi for the full inspector (hierarchy, automation, recording, remote viewing). See [Quick Start](#quick-start).
 2. **Browser viewer** — open a URL on any device on the same WiFi for a live, read-only inspector: Logs, Network, **WebSockets (with schema-less protobuf decoding)**, Leaks, Current screen, Navigation flow, and an interactive **3D view hierarchy with a property inspector**. No Mac, no USB. See [Browser viewer](#watch-everything-in-any-browser-same-wifi). For watching from **any network** (off-LAN — remote tester, cellular), see the [Cloud relay](#cloud-relay--watch-from-any-network-off-lan).
+3. **AI agent** — point Claude Code (or any MCP client) at the running app and it can read the logs, failed requests, view hierarchy and screen while it works. See [Let an AI agent drive it](#let-an-ai-agent-drive-it-agent-api--mcp).
 
 ## Installation
 
@@ -263,6 +264,261 @@ tenant isolation) is in [`cloud/README.md`](cloud/README.md).
 > isolated. Still, a cloud link is more exposed than a LAN socket — only generate
 > one when you mean to share.
 
+## Let an AI agent drive it (agent API + MCP)
+
+The browser viewer is built for a person with a screen. An AI agent needs the
+same state in a form it can *pull*: bounded, filtered, resumable, and cheap in
+tokens. So the same HTTP server also exposes a read-only **agent API** under
+`/api`, and the repo ships an **MCP server** on top of it.
+
+Point Claude Code (or any MCP client) at your running app and ask *"why is the
+checkout screen erroring?"* — it reads the logs, spots the 401, pulls the
+response body, and screenshots the screen, without you copying anything out of
+Xcode.
+
+Nothing new is needed on the app side: link **XpectorServer**, run a DEBUG
+build. The agent API rides on the same port as the browser viewer and is
+compiled out of Release exactly like the rest of the SDK.
+
+### Set up the MCP server
+
+The package is not on npm yet, so build it from this repo:
+
+```bash
+cd mcp
+npm install && npm run build
+```
+
+**Claude Code:**
+
+```bash
+claude mcp add xpector -- node "$PWD/dist/index.js"
+```
+
+**Any other MCP client** (`mcp.json`, `claude_desktop_config.json`, …):
+
+```json
+{
+  "mcpServers": {
+    "xpector": {
+      "command": "node",
+      "args": ["/absolute/path/to/XpectorKit/mcp/dist/index.js"]
+    }
+  }
+}
+```
+
+By default the server probes `127.0.0.1` across the SDK's port range, which
+covers the **iOS Simulator** (it shares loopback with the Mac). For a **physical
+device** — or any non-default port — pass the URL the app prints at launch:
+
+```
+[Xpector] Log stream: http://192.168.1.42:47265/
+```
+
+```json
+{ "env": { "XPECTOR_URL": "http://192.168.1.42:47265" } }
+```
+
+| Variable | Meaning |
+|---|---|
+| `XPECTOR_URL` | Full base URL of the viewer/agent port. Wins over everything else. |
+| `XPECTOR_HOST` | Host to probe instead of `127.0.0.1`. |
+| `XPECTOR_PORT` | The **inspection** port (the agent API sits at `+101`). |
+
+`--url` and `--port` arguments work identically.
+
+### MCP tools
+
+| Tool | What it answers |
+|---|---|
+| `xpector_status` | Which app am I connected to, and what can it capture? |
+| `xpector_summary` | What is wrong right now? Screen, errors, failed requests, leaks, FPS — one call. |
+| `xpector_logs` | What did the app log? Filter by level, source, substring. |
+| `xpector_network` | Which requests ran, which failed, which were slow? |
+| `xpector_network_request` | Full headers and bodies for one request. |
+| `xpector_websockets` | WebSocket frames, with schema-less protobuf decoding. |
+| `xpector_hierarchy` | How is this screen built? Frames, tap points, layout warnings. |
+| `xpector_find` | Where is the element matching this text or class? |
+| `xpector_node` | Every attribute of one view. |
+| `xpector_screenshot` | What does the screen look like? |
+| `xpector_navigation` | How did the user get here? |
+| `xpector_diagnostics` | Did that flow leak, and what is performance doing? |
+
+A typical session starts at `xpector_summary`, then drills in — `xpector_network`
+to find the failing call, `xpector_network_request` for its body,
+`xpector_screenshot` to see what the user sees.
+
+### Or just use `curl`
+
+Every tool is a plain `GET`, so an agent with shell access needs no MCP server at
+all. `?format=text` returns a compact rendering that costs roughly a third of the
+tokens of the equivalent JSON:
+
+```bash
+$ curl 'http://localhost:47265/api/summary?format=text'
+MyApp — iPhone iOS 18.2
+screens: UIKitNavigationController > CheckoutViewController("Checkout")
+last nav: push CartViewController -> CheckoutViewController
+perf: 58 fps, 214 MB (peak 240), 1 hangs, 12 dropped frames
+buffers: leaks=1 logs=100 nav=12 network=48 ws=6
+
+visible text: Checkout | Pay with card | Total $42.00 | Something went wrong
+
+errors (1):
+  14:22:07.113 ERROR Payment token refresh failed (-1009)
+
+failed requests (1):
+  14:22:07.010 POST 401 https://api.example.com/v1/charge
+
+leaks: CheckoutViewController x2
+```
+
+`GET /api` lists every endpoint and its parameters, so an agent can discover the
+whole surface without reading this file.
+
+### Endpoint reference
+
+All endpoints are `GET`, answer JSON by default, and accept `?format=text` for
+the compact rendering shown above.
+
+| Endpoint | Parameters | Returns |
+|---|---|---|
+| `/api` | — | Discovery: app name, capabilities, buffer counts, every endpoint. |
+| `/api/summary` | `logs`, `network` | One-call triage — screens, visible text, FPS, errors, failed requests, leaks. |
+| `/api/logs` | `since`, `limit`, `level`, `source`, `q`, `maxLen` | Log lines, oldest first. |
+| `/api/network` | `since`, `limit`, `q`, `method`, `status`, `host`, `minDuration`, `failedOnly` | Request summaries, no bodies. |
+| `/api/network/<id>` | `maxLen` | One request: headers plus request and response bodies. |
+| `/api/ws` | `since`, `limit`, `connection`, `kind`, `direction`, `q`, `maxLen`, `protobuf` | WebSocket events. |
+| `/api/ws/<connectionId>` | `limit` | One socket's full timeline, with decoded protobuf. |
+| `/api/hierarchy` | `maxNodes`, `maxDepth`, `visibleOnly`, `collapseWrappers`, `constraints` | The view tree — pixels stripped, wrappers collapsed, tap points included. |
+| `/api/find` | `q`, `cls`, `limit`, `visibleOnly` | Views matching text, accessibility label/identifier or class name. |
+| `/api/node/<ref>` | — | Every attribute of one view (accepts a short ref or a full UUID). |
+| `/api/context` | — | App identity, device traits, current screens, visible text. |
+| `/api/nav` | `since`, `limit` | Navigation trail, screenshots stripped. |
+| `/api/leaks` | `since`, `limit` | View controllers that failed to deallocate. |
+| `/api/perf` | — | FPS, memory, hangs, dropped frames, uptime. |
+| `/api/screen` | `encoding=binary\|base64` | The current screen as JPEG, or base64 JSON for tool transports. |
+
+**Filter parameters.** `q` is a case-insensitive substring. `level`, `source`,
+`method`, `host`, `kind` and `direction` take comma-separated lists
+(`?level=error,warning`). `status` takes codes or classes
+(`?status=404`, `?status=4xx,5xx`). Booleans accept `1`, `true`, `yes`, `on`, or
+a bare flag (`?failedOnly`).
+
+**Response envelope.** List endpoints share one shape:
+
+```json
+{
+  "ok": true,
+  "count": 1,
+  "total": 3,
+  "hasMore": true,
+  "nextCursor": "1787799779153-454FFDCD-34E5-4482-95D5-316A2103D8AD",
+  "items": [
+    {
+      "id": "454FFDCD-34E5-4482-95D5-316A2103D8AD",
+      "t": "2026-08-27T03:02:59.154Z",
+      "method": "GET",
+      "status": 200,
+      "host": "httpbin.org",
+      "path": "/get",
+      "url": "https://httpbin.org/get",
+      "durationMs": 1173.4,
+      "bytes": 415
+    }
+  ]
+}
+```
+
+Timestamps are ISO-8601 with milliseconds. Errors answer
+`{"ok": false, "error": "…"}` with a matching HTTP status.
+
+### Built for a context window
+
+Three properties make repeated polling affordable:
+
+- **Filtering runs on the device.** `?failedOnly=1`, `?status=4xx,5xx`,
+  `?level=error`, `?q=checkout` — the agent never pays context for rows it would
+  discard.
+- **Lists are resumable.** Every response carries `nextCursor`; pass it back as
+  `?since=<cursor>` to get only what happened since. The cursor is
+  `<epoch-millis>-<id>`: it matches on the id when that entry is still buffered,
+  and falls back to the timestamp once it has been evicted, so a slow poller
+  still resumes correctly. When a page overflows its `limit`, the **newest**
+  entries are kept — an agent tailing a busy app wants current state, not the
+  oldest backlog, and `total` / `hasMore` disclose what was left behind.
+- **Nothing truncates silently.** `limit`, `maxLen`, `maxNodes` and `maxDepth`
+  all report what they cut. The hierarchy even distinguishes *"the node budget
+  ran out — raise `maxNodes`"* from *"those nodes were hidden or off screen"*, so
+  the agent is not sent chasing a limit that would change nothing.
+
+The hierarchy is the clearest example. The viewer's `/hierarchy` carries a base64
+PNG slice per node — megabytes for one screen. `/api/hierarchy` drops the pixels,
+collapses anonymous single-child wrapper views, culls anything scrolled off
+screen, and prints short `#abcd1234` refs instead of 36-character UUIDs:
+
+```
+$ curl 'http://localhost:47265/api/hierarchy?format=text&maxNodes=10'
+screen 402x874 — 7 nodes, 166 dropped — node budget hit, raise ?maxNodes=
+#359b29bf UIWindow [0,0,402,874]
+  #fd29c667 _UIHostingView<…> <UIHostingController<…>> [0,0,402,874]
+    #3010b533 UIKitPlatformViewHost<…UIKitAdaptableTabView>> [0,0,402,874] tap(201,437)
+      #985e8602 UILayoutContainerView <UIKitTabBarController> [0,0,402,874]
+        #2e9fb643 HostingView <TabHostingController> [0,0,402,874]
+          #0bbc6aa3 UIKitPlatformViewHost<…NavigationStackRepresentable>> [0,0,402,874] tap(201,437)
+        #9725583f _UITabBarContainerView [0,0,402,874] tap(201,437)
+
+attributes for a node: GET /api/node/<ref>
+```
+
+(Fewer nodes come back than the budget allows because collapsing a wrapper view
+refunds its slot. A `note:` line is prepended when the screen is SwiftUI-rendered
+— see below.)
+
+Frames are `[x, y, w, h]` in screen coordinates; `tap(x,y)` is the centre of a
+view an agent could plausibly tap (agents drive the taps out of band, via
+XCUITest or `simctl`). Refs come from the most recent `/api/hierarchy` or
+`/api/find` call and resolve through `/api/node/<ref>`.
+
+### Known limitation — SwiftUI text
+
+SwiftUI draws `Text` into its hosting view's display list rather than into child
+views, and iOS only builds the accessibility tree that would expose that text
+when an assistive client is attached. With none running,
+`accessibilityElements` is nil and `accessibilityElementCount()` is 0 across the
+whole app, and there is no public API to force it.
+
+So on a SwiftUI screen, most of the visible copy is **genuinely absent from the
+view hierarchy** — `/api/find` can miss a label that is plainly on screen, and a
+miss there does not mean the text is not displayed. Responses say so when it
+applies. What still works:
+
+- **`/api/screen`** is the reliable way to read a SwiftUI screen. Multimodal
+  agents read it directly.
+- **Class names, accessibility identifiers and any UIKit text** (nav bars, tab
+  bars, `UILabel`s) match normally.
+- Views carrying an explicit `.accessibilityLabel(_:)` are picked up when the
+  system exposes them.
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| *"No instrumented app answered"* | The app is not running or is backgrounded; it does not link **XpectorServer**; it is a Release build without `startForDevelopment`; or `XPECTOR_DISABLED=1` is set. |
+| Connects to the wrong app | Two instrumented apps are running and the first one found wins. Set `XPECTOR_URL` explicitly. |
+| Nothing on the default port | The app moved via `XPECTOR_PORT`, or port fallback picked another. Use the URL the app prints at launch. |
+| Physical device unreachable | Loopback probing only covers the Simulator. Set `XPECTOR_URL` to the device's LAN address. |
+| `/api/screen` returns 503 | `enableNavigationScreenshots` is off, or the app has no foreground screen. |
+| `/api/node/<ref>` returns 404 | The ref is stale or the view is gone. Re-run `/api/hierarchy` or `/api/find`. |
+
+> **Security.** The agent API is read-only — no endpoint mutates the app — and
+> sits behind exactly the same trust boundary as the browser viewer: same LAN,
+> DEBUG-gated, compiled out of Release. Network bodies and sensitive headers are
+> redacted on egress before an agent ever sees them. To turn it off along with
+> the viewer, set `XPECTOR_LOG_STREAM_DISABLED=1` or
+> `config.enableLocalLogStream = false`.
+
 ## On-device inspector (Network · Sockets · Logs)
 
 Sometimes you want to inspect **on the device itself** — no second screen, no
@@ -432,6 +688,7 @@ if AppEnvironment.current != .production {
 | **Crashes** | Uncaught exceptions and fatal signals | Yes |
 | **Hang Detection** | Main thread unresponsiveness | Opt-in |
 | **Notifications** | NSNotificationCenter events with observer counts | Opt-in |
+| **Agent API** | Read-only `/api` mirror of all of the above, filtered and cursor-paged for AI agents | Yes (with the viewer) |
 
 ## Network Capture
 

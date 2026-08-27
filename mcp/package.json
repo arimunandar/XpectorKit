@@ -1,0 +1,23 @@
+{
+  "name": "xpector-mcp",
+  "version": "0.1.0",
+  "description": "MCP server that lets an AI agent inspect a running iOS app instrumented with XpectorKit — logs, network, WebSockets, view hierarchy, screenshots.",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "xpector-mcp": "dist/index.js" },
+  "files": ["dist", "README.md"],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npm run build",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
