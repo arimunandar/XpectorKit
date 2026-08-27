@@ -20,6 +20,16 @@ struct XpectorDemoApp: App {
         // key the Cloud tab still appears, but tapping Generate won't mint until
         // a real key is set.
         let env = ProcessInfo.processInfo.environment
+        // A manual start bypasses auto-start, and with it auto-start's reading
+        // of XPECTOR_PORT / XPECTOR_PORT_FALLBACK. Honour them here too, so the
+        // demo can run alongside another instrumented app instead of deadlocking
+        // on the occupied default port.
+        if let raw = env["XPECTOR_PORT"], let port = UInt16(raw), port >= 1024, port <= 65_434 {
+            config.port = port
+        }
+        if env["XPECTOR_PORT_FALLBACK"] == "1" {
+            config.allowPortFallback = true
+        }
         config.enableCloudRelay = true
         config.cloudRelayBaseURL = env["XP_RELAY_URL"] ?? "https://relay.xpector.cloud"
         config.cloudRelayIngestKey = env["XP_RELAY_KEY"] ?? "set-XP_RELAY_KEY-to-mint"
