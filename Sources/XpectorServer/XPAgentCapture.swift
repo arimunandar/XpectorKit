@@ -246,7 +246,7 @@ enum XPAgentCapture {
                             textNodes: textNodes,
                             swiftUIHosts: swiftUIHosts,
                             note: swiftUIHosts > 0 && textNodes < swiftUIHosts
-                                ? "SwiftUI draws text into its hosting view's display list, not into child views, so most on-screen copy is absent from this tree. Read /api/screen for what the screen actually says; /api/find still matches class names, accessibility identifiers and any UIKit text."
+                                ? "SwiftUI text is missing from this tree because the accessibility tree has not been built. Attach an accessibility client ONCE to fix it for the rest of the app's lifetime — e.g. `maestro --device <udid> hierarchy`, or any XCUITest run. This note disappears once that works. Until then, read /api/screen. Note that SwiftUI List/LazyStack cells below the fold have no view at all until scrolled into range, so they stay unmatchable either way."
                                 : nil,
                             windows: windows
                         ))
@@ -264,16 +264,26 @@ enum XPAgentCapture {
     /// publishes accessibility elements — custom UIKit containers, and SwiftUI
     /// views carrying an explicit `.accessibilityLabel(_:)`.
     ///
-    /// It is **not** a general answer for SwiftUI. SwiftUI draws `Text` through
-    /// the hosting view's display list rather than into `UILabel`s, so a whole
-    /// screen of copy sits inside one `CellHostingView` with no child view to
-    /// read. UIKit would expose that copy through the accessibility tree, but it
-    /// only builds that tree when an assistive client is attached — with none
-    /// running, `accessibilityElements` is nil and `accessibilityElementCount()`
-    /// is 0 across the entire app (measured, not assumed). There is no public
-    /// API to force it. `Screen.note` therefore tells the agent when it is
-    /// looking at a SwiftUI-rendered screen so it can fall back to reading
-    /// `/api/screen`, which is where that text actually is.
+    /// On SwiftUI this depends on whether the accessibility tree exists yet.
+    /// SwiftUI draws `Text` through the hosting view's display list rather than
+    /// into `UILabel`s, so a screen of copy sits inside one `CellHostingView`
+    /// with no child view to read. UIKit exposes that copy through the
+    /// accessibility tree — but only builds it once an assistive client
+    /// attaches. With none running, `accessibilityElements` is nil and
+    /// `accessibilityElementCount()` is 0 across the entire app, and no public
+    /// API forces it from inside the process.
+    ///
+    /// It can be forced from *outside*, though, and the effect is permanent for
+    /// the process: attaching any accessibility client once — `maestro
+    /// hierarchy`, or any XCUITest run — builds the tree, and it stays built
+    /// after that client detaches. Measured on a SwiftUI list: 5 text nodes
+    /// before, 30 after, still 30 once the driver was gone. `Screen.note`
+    /// therefore tells the agent how to fix this rather than only that it is
+    /// broken, and disappears on its own once coverage improves.
+    ///
+    /// One thing priming does *not* fix: SwiftUI `List` and lazy stacks
+    /// virtualize, so rows below the fold have no view to find at all. Scroll
+    /// them into range first.
     private static func harvestAccessibility(_ windows: [XPViewNode]) -> [UUID: String] {
         dispatchPrecondition(condition: .onQueue(.main))
         var out: [UUID: String] = [:]
