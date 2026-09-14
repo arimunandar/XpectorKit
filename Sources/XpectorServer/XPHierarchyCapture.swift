@@ -176,6 +176,7 @@ final class XPHierarchyCapture {
         parentFrameToRoot: XPRect,
         request: XPHierarchyRequest,
         depth: Int = 0,
+        parentTransformed: Bool = false,
         pendingImages: inout [UUID: UIImage]
     ) -> XPViewNode {
         let nodeID = Self.identity(of: view)
@@ -184,9 +185,22 @@ final class XPHierarchyCapture {
         let frame = XPRect(view.frame)
         let bounds = XPRect(view.bounds)
 
-        let frameToRootX = frame.x - Double(view.superview?.bounds.origin.x ?? 0) + parentFrameToRoot.x
-        let frameToRootY = frame.y - Double(view.superview?.bounds.origin.y ?? 0) + parentFrameToRoot.y
-        let frameToRoot = XPRect(x: frameToRootX, y: frameToRootY, width: frame.width, height: frame.height)
+        // `frame` is already the transformed bounding box, and parent offsets
+        // stop composing linearly once anything in the chain is transformed — so
+        // the additive fast path silently lies about position, and every
+        // descendant inherits the error. UIKit's own chain walk is correct but
+        // O(depth); a transform is rare enough that paying for it only there
+        // keeps the common case free.
+        let transformed = parentTransformed || !view.transform.isIdentity
+        let frameToRoot: XPRect
+        if transformed {
+            frameToRoot = XPRect(view.superview?.convert(view.frame, to: nil) ?? view.frame)
+        } else {
+            let frameToRootX = frame.x - Double(view.superview?.bounds.origin.x ?? 0) + parentFrameToRoot.x
+            let frameToRootY = frame.y - Double(view.superview?.bounds.origin.y ?? 0) + parentFrameToRoot.y
+            frameToRoot = XPRect(x: frameToRootX, y: frameToRootY,
+                                 width: frame.width, height: frame.height)
+        }
 
         if request.includeScreenshots && frame.width > 0 && frame.height > 0 {
             if let image = rasterizeSoloImage(
@@ -234,6 +248,7 @@ final class XPHierarchyCapture {
                     parentFrameToRoot: frameToRoot,
                     request: request,
                     depth: depth + 1,
+                    parentTransformed: transformed,
                     pendingImages: &pendingImages
                 ))
             }
@@ -259,6 +274,7 @@ final class XPHierarchyCapture {
             textContent: textContent,
             hasAmbiguousLayout: ambiguous,
             constraintDescriptions: constraintDescs,
+            hasTransform: transformed,
             gestureRecognizers: gestureTypes,
             swiftUIType: swiftUIType,
             navigationInfo: navInfo

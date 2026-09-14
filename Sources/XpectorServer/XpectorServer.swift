@@ -904,7 +904,7 @@ public final class XpectorServer: @unchecked Sendable {
     static var serverCapabilities: [String] {
         var caps = [
             "tagCorrelation",
-            "hierarchy", "nodeDetail", "modifyAttribute", "screenshot",
+            "hierarchy", "nodeDetail", "modifyAttribute", "screenshot", "transforms",
             "network", "throttling", "websocket",
             "navigation", "context",
             "logs", "crash", "perf",

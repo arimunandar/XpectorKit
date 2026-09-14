@@ -25,6 +25,7 @@ public final class XPAgentNode: Encodable {
     public let alpha: Double?
     public let interactive: Bool?
     public let ambiguousLayout: Bool?
+    public let transformed: Bool?
     public let constraints: [String]?
     public let gestures: [String]?
     public let swiftUI: String?
@@ -34,7 +35,8 @@ public final class XPAgentNode: Encodable {
     public init(
         id: String, ref: String, cls: String, vc: String?, text: String?, label: String?,
         ident: String?, frame: [Double], tap: [Double]?, traits: [String]?, hidden: Bool?,
-        alpha: Double?, interactive: Bool?, ambiguousLayout: Bool?, constraints: [String]?,
+        alpha: Double?, interactive: Bool?, ambiguousLayout: Bool?, transformed: Bool?,
+        constraints: [String]?,
         gestures: [String]?, swiftUI: String?, depth: Int, children: [XPAgentNode]
     ) {
         self.id = id
@@ -51,6 +53,7 @@ public final class XPAgentNode: Encodable {
         self.alpha = alpha
         self.interactive = interactive
         self.ambiguousLayout = ambiguousLayout
+        self.transformed = transformed
         self.constraints = constraints
         self.gestures = gestures
         self.swiftUI = swiftUI
@@ -60,7 +63,7 @@ public final class XPAgentNode: Encodable {
 
     private enum CodingKeys: String, CodingKey {
         case id, ref, cls, vc, text, label, ident, frame, tap, traits, hidden, alpha
-        case interactive, ambiguousLayout, constraints, gestures, swiftUI, depth, children
+        case interactive, ambiguousLayout, transformed, constraints, gestures, swiftUI, depth, children
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -79,6 +82,7 @@ public final class XPAgentNode: Encodable {
         try c.encodeIfPresent(alpha, forKey: .alpha)
         try c.encodeIfPresent(interactive, forKey: .interactive)
         try c.encodeIfPresent(ambiguousLayout, forKey: .ambiguousLayout)
+        try c.encodeIfPresent(transformed, forKey: .transformed)
         try c.encodeIfPresent(constraints, forKey: .constraints)
         try c.encodeIfPresent(gestures, forKey: .gestures)
         try c.encodeIfPresent(swiftUI, forKey: .swiftUI)
@@ -407,6 +411,7 @@ public enum XPTreeProjection {
             alpha: node.alpha < 0.99 ? round2(node.alpha) : nil,
             interactive: interactive ? true : nil,
             ambiguousLayout: node.hasAmbiguousLayout ? true : nil,
+            transformed: node.hasTransform ? true : nil,
             constraints: options.includeConstraints && !node.constraintDescriptions.isEmpty
                 ? node.constraintDescriptions : nil,
             gestures: node.gestureRecognizers.isEmpty ? nil : node.gestureRecognizers,
@@ -424,6 +429,7 @@ public enum XPTreeProjection {
             label: node.label, ident: node.ident, frame: node.frame, tap: node.tap,
             traits: node.traits, hidden: node.hidden, alpha: node.alpha,
             interactive: node.interactive, ambiguousLayout: node.ambiguousLayout,
+            transformed: node.transformed,
             constraints: node.constraints, gestures: node.gestures, swiftUI: node.swiftUI,
             depth: depth, children: []
         )

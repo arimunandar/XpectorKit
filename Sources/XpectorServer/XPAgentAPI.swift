@@ -864,6 +864,7 @@ extension XPHttpLogServer {
             if node.hidden == true { line += " HIDDEN" }
             if let alpha = node.alpha { line += " alpha=\(alpha)" }
             if node.ambiguousLayout == true { line += " AMBIGUOUS-LAYOUT" }
+            if node.transformed == true { line += " TRANSFORMED" }
             if let constraints = node.constraints {
                 line += constraints.map { "\n\(pad)    | \($0)" }.joined()
             }

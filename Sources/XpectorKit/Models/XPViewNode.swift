@@ -28,6 +28,11 @@ public struct XPViewNode: Identifiable, Codable, Sendable {
     // Layout diagnostics
     public let hasAmbiguousLayout: Bool
     public let constraintDescriptions: [String]
+    /// True when this view, or an ancestor, carries a non-identity transform.
+    /// `frame` and `frameToRoot` are then the axis-aligned *bounding box* of the
+    /// transformed view, not its true rect — which is what a consumer needs to
+    /// know before trusting the geometry.
+    public let hasTransform: Bool
 
     // Gesture recognizers
     public let gestureRecognizers: [String]
@@ -80,6 +85,7 @@ public struct XPViewNode: Identifiable, Codable, Sendable {
         textContent: String? = nil,
         hasAmbiguousLayout: Bool = false,
         constraintDescriptions: [String] = [],
+        hasTransform: Bool = false,
         gestureRecognizers: [String] = [],
         swiftUIType: String? = nil,
         navigationInfo: NavigationInfo? = nil
@@ -103,6 +109,7 @@ public struct XPViewNode: Identifiable, Codable, Sendable {
         self.textContent = textContent
         self.hasAmbiguousLayout = hasAmbiguousLayout
         self.constraintDescriptions = constraintDescriptions
+        self.hasTransform = hasTransform
         self.gestureRecognizers = gestureRecognizers
         self.swiftUIType = swiftUIType
         self.navigationInfo = navigationInfo
