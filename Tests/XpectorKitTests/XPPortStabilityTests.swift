@@ -42,7 +42,7 @@ final class XPPortStabilityTests: XCTestCase {
         var serverAddr = address(port: port, loopback: false)
         let bound = withUnsafePointer(to: &serverAddr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(server, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                Darwin.bind(server, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
         try XCTUnwrap(bound == 0 ? true : nil, "setup bind failed on \(port), errno=\(errno)")
@@ -72,7 +72,7 @@ final class XPPortStabilityTests: XCTestCase {
         // No SO_REUSEADDR: this is the old probe, which fails on TIME_WAIT.
         let result = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(probe, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                Darwin.bind(probe, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
         return result != 0
