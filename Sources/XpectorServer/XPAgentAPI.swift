@@ -620,7 +620,7 @@ extension XPHttpLogServer {
         let count: Int
         let primed: Bool
         let note: String?
-        let items: [XPAgentCapture.Hit]
+        let items: [XPTreeHit]
     }
 
     /// One view's full attributes, resolving the short `#abcd1234` refs the
@@ -630,7 +630,7 @@ extension XPHttpLogServer {
     /// `enableNavigationScreenshots`: that flag gates *screenshot content*, and
     /// this response carries none — the agent tree is pixel-free throughout.
     private func serveAgentNode(_ fd: Int32, ref: String) {
-        guard let uuid = XPAgentCapture.resolveRef(ref) else {
+        guard let uuid = XPNodeRefIndex.resolveRef(ref) else {
             writeAgentError(fd, status: "404 Not Found",
                             message: "Unknown node ref \(ref) — refs come from the most recent /api/hierarchy or /api/find call.")
             return
@@ -837,7 +837,7 @@ extension XPHttpLogServer {
         return text
     }
 
-    private static func renderTree(_ screen: XPAgentCapture.Screen) -> String {
+    private static func renderTree(_ screen: XPScreen) -> String {
         var header = "screen \(Int(screen.width))x\(Int(screen.height)) — \(screen.nodeCount) nodes"
         if screen.droppedNodes > 0 {
             // Only point at ?maxNodes= when the budget is what actually cut the
@@ -852,7 +852,7 @@ extension XPHttpLogServer {
             lines.append("note: \(note)")
         }
 
-        func walk(_ node: XPAgentCapture.XPAgentNode, indent: Int) {
+        func walk(_ node: XPAgentNode, indent: Int) {
             let pad = String(repeating: "  ", count: indent)
             var line = "\(pad)#\(node.ref) \(node.cls)"
             if let vc = node.vc { line += " <\(vc)>" }
@@ -1001,8 +1001,8 @@ extension XPHttpLogServer {
         clockFormatter.string(from: date)
     }
 
-    private func options(from request: XPHttpRequest) -> XPAgentCapture.Options {
-        var options = XPAgentCapture.Options()
+    private func options(from request: XPHttpRequest) -> XPTreeProjection.Options {
+        var options = XPTreeProjection.Options()
         options.maxDepth = request.int("maxDepth", default: options.maxDepth, min: 1, max: 200)
         options.maxNodes = request.int("maxNodes", default: options.maxNodes, min: 1, max: 5000)
         options.visibleOnly = request.bool("visibleOnly", default: options.visibleOnly)
