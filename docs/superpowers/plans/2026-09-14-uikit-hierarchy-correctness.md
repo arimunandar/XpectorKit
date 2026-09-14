@@ -4,7 +4,7 @@
 
 **Goal:** Make the view hierarchy report node identity, layout ambiguity, and transformed geometry correctly, and make the surrounding tree logic testable.
 
-**Architecture:** Node identity moves from a per-capture UUID onto the `UIView` itself via an associated object, so identity equals object lifetime and concurrent consumers stop invalidating each other's refs. The ambiguity gate drops the half that hid the views worth flagging, and constraint descriptions become opt-in. `frameToRoot` keeps its O(n) arithmetic fast path and falls back to UIKit's chain walk only where a transform makes that arithmetic invalid. The UIKit-free tree projection moves into `XpectorKit` so it can be unit tested under `swift test`.
+**Architecture:** Node identity moves from a per-capture UUID onto the `UIView` itself via an associated object, so identity equals object lifetime and concurrent consumers stop invalidating each other's refs. The ambiguity gate drops the half that hid the views worth flagging, and constraint descriptions become opt-in. `frameToRoot` keeps its O(n) arithmetic fast path and falls back to UIKit's chain walk only where a transform makes that arithmetic invalid. The UIKit-free tree projection moves into `XpectorKit` so the existing simulator test target can cover it.
 
 **Tech Stack:** Swift 5.9 tools version, SwiftPM, XCTest, UIKit, ObjC runtime (`objc_setAssociatedObject`).
 
@@ -16,9 +16,10 @@
 - **Wire changes are additive only.** Outbound fields rely on synthesised `Decodable` ignoring unknown keys; inbound fields require explicit `decodeIfPresent`.
 - **Platform floors:** iOS 15, macOS 14. Swift tools version 5.9.
 - **Two verification commands, and they are not interchangeable:**
-  - Pure logic: `swift test` — builds `XpectorKit` and `XpectorKitTests` only.
-  - UIKit code: `xcodebuild -scheme XpectorServer -destination 'generic/platform=iOS Simulator' build` — takes ~10s.
-  - **`swift build` fails by design.** `XpectorServer` imports UIKit, which macOS cannot provide. Never use it as a verification step.
+  - Tests: `xcodebuild test -scheme XpectorKit-Package -destination 'platform=iOS Simulator,name=iPhone 17 Pro'` — ~22s. Runs `XpectorKitTests` on a simulator.
+  - UIKit compile check: `xcodebuild -scheme XpectorServer -destination 'generic/platform=iOS Simulator' build` — ~10s.
+  - **Neither `swift build` nor `swift test` works on this package.** Both build every target, including `XpectorServer`, which imports UIKit — unavailable on macOS. `swift test` fails with `no such module 'UIKit'` regardless of `--filter`, because filtering selects which tests *run*, not which targets *build*. Never use either as a verification step.
+  - To run one suite, add `-only-testing:XpectorKitTests/<SuiteName>` to the test command.
 - **Commit style:** conventional commits matching repo history, e.g. `fix(hierarchy): …`, `refactor(agent): …`. Lowercase description, no trailing period.
 - The SDK auto-starts in DEBUG only. Nothing here changes that.
 
@@ -26,7 +27,7 @@
 
 ### Task 1: Repair the test suite
 
-`swift test` does not compile on `main`. Swift 6.2 / macOS 26 SDK resolves a bare `bind` inside an `XCTestCase` subclass to `NSObject.bind(_:to:withKeyPath:options:)` (Cocoa Bindings) rather than `Darwin.bind`. Every later task's test step depends on this, so it goes first.
+The test suite does not compile on `main`. Swift 6.2 / macOS 26 SDK resolves a bare `bind` inside an `XCTestCase` subclass to `NSObject.bind(_:to:withKeyPath:options:)` (Cocoa Bindings) rather than `Darwin.bind`. Every later task's test step depends on this, so it goes first.
 
 This is pre-existing breakage unrelated to the feature work.
 
@@ -35,11 +36,11 @@ This is pre-existing breakage unrelated to the feature work.
 
 **Interfaces:**
 - Consumes: nothing
-- Produces: a green `swift test` baseline that every later task depends on
+- Produces: a green test baseline that every later task depends on
 
 - [ ] **Step 1: Confirm the failure**
 
-Run: `swift test 2>&1 | grep -E "error:" | sort -u`
+Run: `xcodebuild test -scheme XpectorKit-Package -destination 'platform=iOS Simulator,name=iPhone 17 Pro' 2>&1 | grep -E "error:" | sort -u`
 
 Expected: two errors reading `use of 'bind' refers to instance method rather than global function 'bind' in module 'Darwin'`, at `XPPortStabilityTests.swift:45` and `:75`.
 
@@ -63,8 +64,8 @@ Apply the identical change at line 75, where the receiver is `probe` rather than
 
 - [ ] **Step 3: Verify the suite runs**
 
-Run: `swift test`
-Expected: PASS. Existing tests are `XPWireFrameTests`, `XPMessageTests`, `XPPortStabilityTests`.
+Run: `xcodebuild test -scheme XpectorKit-Package -destination 'platform=iOS Simulator,name=iPhone 17 Pro'`
+Expected: `** TEST SUCCEEDED **`. Existing tests are `XPWireFrameTests`, `XPMessageTests`, `XPPortStabilityTests`.
 
 - [ ] **Step 4: Commit**
 
@@ -145,7 +146,7 @@ final class XPHierarchyRequestTests: XCTestCase {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `swift test --filter XPHierarchyRequestTests`
+Run: `xcodebuild test -scheme XpectorKit-Package -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -only-testing:XpectorKitTests/XPHierarchyRequestTests`
 Expected: FAIL. `testEmptyPayloadDecodesToDefaults` and `testPartialPayloadKeepsTheFieldsItDidSend` fail on `keyNotFound`; the other two fail to compile on the unknown `includeConstraints` argument.
 
 - [ ] **Step 3: Replace the file**
@@ -203,7 +204,7 @@ public struct XPHierarchyRequest: Codable, Sendable {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `swift test --filter XPHierarchyRequestTests`
+Run: `xcodebuild test -scheme XpectorKit-Package -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -only-testing:XpectorKitTests/XPHierarchyRequestTests`
 Expected: PASS, 4 tests.
 
 - [ ] **Step 5: Confirm XpectorServer still compiles**
@@ -222,7 +223,7 @@ git commit -m "fix(hierarchy): decode XPHierarchyRequest field by field so a par
 
 ### Task 3: Extract the pure tree projection into XpectorKit
 
-`XPAgentCapture` is 696 lines, and most of its logic already operates on `XPViewNode` — a pure `Codable` model — rather than on live views. Moving that logic into `XpectorKit` makes it testable under `swift test` and brings the file to roughly 300 lines.
+`XPAgentCapture` is 696 lines, and most of its logic already operates on `XPViewNode` — a pure `Codable` model — rather than on live views. Moving that logic into `XpectorKit` brings it within reach of the existing test target, and brings the file to roughly 300 lines.
 
 This task is a **pure refactor plus tests**. No behaviour changes. If a test forces a behaviour change, stop and flag it.
 
@@ -495,7 +496,7 @@ Leave `XPAgentCapture.context`, `XPAgentCapture.hierarchy`, `XPAgentCapture.find
 
 - [ ] **Step 6: Verify both targets compile**
 
-Run: `swift test` — Expected: PASS (existing tests plus Task 2's; no new tests yet).
+Run: `xcodebuild test -scheme XpectorKit-Package -destination 'platform=iOS Simulator,name=iPhone 17 Pro'` — Expected: `** TEST SUCCEEDED **` (existing tests plus Task 2's; no new tests yet).
 Run: `xcodebuild -scheme XpectorServer -destination 'generic/platform=iOS Simulator' build 2>&1 | tail -3` — Expected: `** BUILD SUCCEEDED **`.
 
 - [ ] **Step 7: Write the projection tests**
@@ -732,7 +733,7 @@ final class XPTreeProjectionTests: XCTestCase {
 
 - [ ] **Step 8: Run the tests**
 
-Run: `swift test --filter XPTreeProjectionTests`
+Run: `xcodebuild test -scheme XpectorKit-Package -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -only-testing:XpectorKitTests/XPTreeProjectionTests`
 Expected: PASS, 13 tests.
 
 If any fail, the extraction changed behaviour — that is a refactor bug, not a test bug. Compare against the original `XPAgentCapture` implementation before touching the assertions.
@@ -818,7 +819,7 @@ Expected: `** BUILD SUCCEEDED **`. `objc` is available via the existing `import 
 
 - [ ] **Step 4: Verify behaviour by hand**
 
-This is UIKit-bound and cannot be unit tested under `swift test`. Verify against the demo app:
+This is UIKit-bound. `XpectorKitTests` depends only on `XpectorKit`, so it cannot see this code — verify against the demo app:
 
 ```bash
 xcodebuild -project XpectorDemo/XpectorDemo.xcodeproj -scheme XpectorDemo \
@@ -1097,7 +1098,7 @@ In `Sources/XpectorServer/XPAgentAPI.swift`, inside `renderTree`'s `walk`, after
 
 - [ ] **Step 6: Verify both targets compile**
 
-Run: `swift test` — Expected: PASS. The `hasTransform` default keeps the Task 3 test fixture compiling unchanged.
+Run: `xcodebuild test -scheme XpectorKit-Package -destination 'platform=iOS Simulator,name=iPhone 17 Pro'` — Expected: `** TEST SUCCEEDED **`. The `hasTransform` default keeps the Task 3 test fixture compiling unchanged.
 Run: `xcodebuild -scheme XpectorServer -destination 'generic/platform=iOS Simulator' build 2>&1 | tail -3` — Expected: `** BUILD SUCCEEDED **`.
 
 - [ ] **Step 7: Verify no regression on untransformed views**
@@ -1226,7 +1227,7 @@ git commit -m "refactor(viewer): re-select layers by stable node id"
 
 ## Final verification
 
-- [ ] `swift test` — all suites pass
+- [ ] `xcodebuild test -scheme XpectorKit-Package -destination 'platform=iOS Simulator,name=iPhone 17 Pro'` — `** TEST SUCCEEDED **`
 - [ ] `xcodebuild -scheme XpectorServer -destination 'generic/platform=iOS Simulator' build` — `** BUILD SUCCEEDED **`
 - [ ] `git log --oneline main..HEAD` shows seven commits, one per task
 - [ ] No temporary demo transform left in `UIKitDemoViewController.swift`: `git diff main -- XpectorDemo/` is empty
@@ -1235,7 +1236,7 @@ git commit -m "refactor(viewer): re-select layers by stable node id"
 
 Carried forward from the spec, in value order:
 
-1. A simulator test target covering identity lifetime, transform math, and rasterization side effects. Tasks 4, 5 and 6 are verified by hand because `swift test` cannot build UIKit code — this is the gap that closes that.
+1. A simulator test target covering identity lifetime, transform math, and rasterization side effects. Tasks 4, 5 and 6 are verified by hand because `XpectorKitTests` depends only on `XpectorKit` and so cannot see UIKit code. **This is cheaper than the spec assumed:** the test target already runs on an iOS simulator, so closing this gap means adding `XpectorServer` to that target's dependencies, not building new infrastructure. Out of scope here, but the next round starts from a much better position than "build a simulator test target".
 2. Hit-test / point-to-view endpoint.
 3. CALayer traversal.
 4. Rasterization side effects — `rasterizeSoloImage` mutates `isHidden` on live views, which invalidates `UIStackView` layout and fires host KVO twice per node per capture.
