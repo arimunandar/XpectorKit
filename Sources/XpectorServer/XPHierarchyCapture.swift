@@ -206,18 +206,21 @@ final class XPHierarchyCapture {
 
         let accessibilityTraits = traitsToStrings(view.accessibilityTraits)
 
-        let constraintDescs: [String]
-        let ambiguous: Bool
-        if !view.translatesAutoresizingMaskIntoConstraints && !view.constraints.isEmpty {
-            constraintDescs = view.constraintsAffectingLayout(for: .horizontal)
-                .map { $0.description } +
-                view.constraintsAffectingLayout(for: .vertical)
-                .map { $0.description }
-            ambiguous = view.hasAmbiguousLayout
-        } else {
-            constraintDescs = []
-            ambiguous = false
-        }
+        // `view.constraints` holds only constraints this view *owns* — those for
+        // which it is the closest common ancestor. A label pinned by its
+        // superview owns none, so requiring a non-empty list hid exactly the
+        // views worth flagging, and disagreed with the property panel, which
+        // never had that gate. Autoresizing-mask views genuinely cannot be
+        // ambiguous, so that half of the guard stays.
+        let usesAutoLayout = !view.translatesAutoresizingMaskIntoConstraints
+        let ambiguous = usesAutoLayout && view.hasAmbiguousLayout
+
+        // Descriptions cost two layout-engine queries per view and are the
+        // expensive half, so they stay opt-in. The flag above does not.
+        let constraintDescs: [String] = request.includeConstraints && usesAutoLayout
+            ? view.constraintsAffectingLayout(for: .horizontal).map(\.description)
+                + view.constraintsAffectingLayout(for: .vertical).map(\.description)
+            : []
 
         let navInfo = extractNavigationInfo(for: view, viewController: vc)
         let swiftUIType = extractSwiftUIType(from: view)
