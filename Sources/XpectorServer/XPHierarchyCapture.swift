@@ -4,6 +4,33 @@ import XpectorKit
 final class XPHierarchyCapture {
     private static var viewRegistry = NSMapTable<NSUUID, UIView>.strongToWeakObjects()
 
+    /// A private, stable address used as the associated-object key. Allocated
+    /// once; never freed. Taking the address of a static var is not valid for
+    /// this under Swift's exclusivity rules, which is why this is a raw pointer.
+    private static let identityKey = UnsafeRawPointer(
+        UnsafeMutablePointer<UInt8>.allocate(capacity: 1))
+
+    /// The stable identity of a view, for as long as the view lives.
+    ///
+    /// Minting a fresh UUID per capture meant any second consumer invalidated
+    /// the first's refs: the browser viewer polls `/hierarchy` every 1.5s, so an
+    /// agent's `#ref` died almost immediately and `/api/node/<ref>` answered
+    /// "no longer live" for a view plainly still on screen.
+    ///
+    /// The association dies with the object, so a new view landing on a recycled
+    /// address gets a fresh stamp — which is why identity is stored here rather
+    /// than derived from `ObjectIdentifier`, whose value can be reused.
+    static func identity(of view: UIView) -> UUID {
+        dispatchPrecondition(condition: .onQueue(.main))
+        if let existing = objc_getAssociatedObject(view, identityKey) as? NSUUID {
+            return existing as UUID
+        }
+        let fresh = UUID()
+        objc_setAssociatedObject(view, identityKey, fresh as NSUUID,
+                                 .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        return fresh
+    }
+
     /// Image encoding (JPEG/PNG compression) is the expensive half of a
     /// hierarchy snapshot; it runs here so the main thread only pays for
     /// traversal and rasterization.
@@ -151,7 +178,7 @@ final class XPHierarchyCapture {
         depth: Int = 0,
         pendingImages: inout [UUID: UIImage]
     ) -> XPViewNode {
-        let nodeID = UUID()
+        let nodeID = Self.identity(of: view)
         viewRegistry.setObject(view, forKey: nodeID as NSUUID)
 
         let frame = XPRect(view.frame)
