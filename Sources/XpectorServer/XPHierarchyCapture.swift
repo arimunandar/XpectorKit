@@ -200,8 +200,7 @@ final class XPHierarchyCapture {
         let transformed = parentTransformed || !view.transform.isIdentity
             || !CATransform3DIsIdentity(view.layer.transform)
         let frameToRoot: XPRect
-        if transformed {
-            let converted = view.superview?.convert(view.frame, to: nil) ?? view.frame
+        if transformed, let superview = view.superview {
             // `convert(_:to: nil)` lands in the *window's* base coordinate
             // space (origin at the window's own top-left), not the screen's.
             // The fast path below produces screen coordinates — a window's
@@ -210,14 +209,16 @@ final class XPHierarchyCapture {
             // iPad Stage Manager or Slide Over the window's origin is
             // non-zero, so re-add it here; otherwise a transformed subtree
             // would land offset from the rest of the capture by exactly the
-            // window's position on screen. (The captured view may itself be
-            // the window, so check for that before asking `.window`.)
-            let window = (view as? UIWindow) ?? view.window
-            if let origin = window?.frame.origin {
-                frameToRoot = XPRect(converted.offsetBy(dx: origin.x, dy: origin.y))
-            } else {
-                frameToRoot = XPRect(converted)
-            }
+            // window's position on screen.
+            let converted = superview.convert(view.frame, to: nil)
+            let origin = view.window?.frame.origin ?? .zero
+            frameToRoot = XPRect(converted.offsetBy(dx: origin.x, dy: origin.y))
+        } else if transformed {
+            // A superview-less view here is the window itself (or detached):
+            // its own `frame` is already screen-relative — see the fast path
+            // below — so adding the window origin on top would double-count
+            // it and shift the rect by exactly the window's screen position.
+            frameToRoot = XPRect(view.frame)
         } else {
             let frameToRootX = frame.x - Double(view.superview?.bounds.origin.x ?? 0) + parentFrameToRoot.x
             let frameToRootY = frame.y - Double(view.superview?.bounds.origin.y ?? 0) + parentFrameToRoot.y
