@@ -487,8 +487,29 @@ refunds its slot. A `note:` line is prepended when the screen is SwiftUI-rendere
 
 Frames are `[x, y, w, h]` in screen coordinates; `tap(x,y)` is the centre of a
 view an agent could plausibly tap (agents drive the taps out of band, via
-XCUITest or `simctl`). Refs come from the most recent `/api/hierarchy` or
-`/api/find` call and resolve through `/api/node/<ref>`.
+XCUITest or `simctl`).
+
+**Refs are stable for as long as the view lives** (since 0.2.43). A ref survives
+other consumers capturing in between — the browser viewer polls every 1.5s — so
+`/api/node/<ref>` keeps resolving while the view is on screen. A 404 now means
+the view genuinely left the hierarchy. Note that some system-chrome views
+(`_UIPortalView` and friends) are rebuilt by UIKit on every capture, so those are
+new objects each time and legitimately get new refs.
+
+Two markers qualify the geometry and layout of a node:
+
+- `TRANSFORMED` — this view, or an ancestor, carries a transform (affine or 3D).
+  Its frame is then the axis-aligned **bounding box**, not the true rect. Gate on
+  the `transforms` capability from `/api`; the JSON field is `transformed`, and
+  the underlying node carries `hasTransform`.
+- `AMBIGUOUS-LAYOUT` — Auto Layout cannot fully determine this view's position or
+  size. Since 0.2.43 this is reported for views laid out by constraints their
+  *superview* owns, which is the common case and was previously missed entirely.
+  Expect to see it on screens where it never appeared before; that is the bug
+  being fixed, not a new problem in your app.
+
+Per-node constraint descriptions remain opt-in via `?constraints=1`, which now
+gates the layout-engine queries themselves rather than only the output.
 
 ### How much history is kept
 
