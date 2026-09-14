@@ -500,8 +500,12 @@ public enum XPTreeProjection {
 /// a full 36-character UUID (≈14) and the agent can still round-trip that
 /// reference back through `/api/node/<ref>`.
 ///
-/// Rebuilt on every capture — a stale ref resolves to nothing and the
-/// endpoint answers 404, the same as a view that is no longer live.
+/// Rebuilt from scratch on every capture, not accumulated across them — but
+/// since a view's id is now stable for its lifetime, a ref to a view that is
+/// still around resolves again next capture; the rebuild only narrows the
+/// index to the current tree. So a ref stops resolving when, and only when,
+/// the view it names is actually gone, and the endpoint answers 404 the same
+/// as for any view that is no longer live.
 public enum XPNodeRefIndex {
     private static var refIndex: [String: UUID] = [:]
     private static let refLock = NSLock()

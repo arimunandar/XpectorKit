@@ -191,10 +191,33 @@ final class XPHierarchyCapture {
         // descendant inherits the error. UIKit's own chain walk is correct but
         // O(depth); a transform is rare enough that paying for it only there
         // keeps the common case free.
+        //
+        // `view.transform` is the affine transform only. A view carried by a
+        // non-affine `layer.transform` (a `CATransform3D` — card flips, 3D
+        // transition animations) reports `transform.isIdentity == true` while
+        // still moving on screen, so both are checked — missing this is
+        // exactly the silent-lie shape this slow path exists to eliminate.
         let transformed = parentTransformed || !view.transform.isIdentity
+            || !CATransform3DIsIdentity(view.layer.transform)
         let frameToRoot: XPRect
         if transformed {
-            frameToRoot = XPRect(view.superview?.convert(view.frame, to: nil) ?? view.frame)
+            let converted = view.superview?.convert(view.frame, to: nil) ?? view.frame
+            // `convert(_:to: nil)` lands in the *window's* base coordinate
+            // space (origin at the window's own top-left), not the screen's.
+            // The fast path below produces screen coordinates — a window's
+            // own frameToRoot is its `frame`, which is screen-relative — so
+            // the two paths only agree when the window sits at (0, 0). Under
+            // iPad Stage Manager or Slide Over the window's origin is
+            // non-zero, so re-add it here; otherwise a transformed subtree
+            // would land offset from the rest of the capture by exactly the
+            // window's position on screen. (The captured view may itself be
+            // the window, so check for that before asking `.window`.)
+            let window = (view as? UIWindow) ?? view.window
+            if let origin = window?.frame.origin {
+                frameToRoot = XPRect(converted.offsetBy(dx: origin.x, dy: origin.y))
+            } else {
+                frameToRoot = XPRect(converted)
+            }
         } else {
             let frameToRootX = frame.x - Double(view.superview?.bounds.origin.x ?? 0) + parentFrameToRoot.x
             let frameToRootY = frame.y - Double(view.superview?.bounds.origin.y ?? 0) + parentFrameToRoot.y

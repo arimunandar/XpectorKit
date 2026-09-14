@@ -28,7 +28,9 @@ public struct XPViewNode: Identifiable, Codable, Sendable {
     // Layout diagnostics
     public let hasAmbiguousLayout: Bool
     public let constraintDescriptions: [String]
-    /// True when this view, or an ancestor, carries a non-identity transform.
+    /// True when this view, or an ancestor, carries a non-identity transform —
+    /// either the affine `transform` or a non-affine `layer.transform`
+    /// (`CATransform3D`, as used by card flips and 3D transition animations).
     /// `frame` and `frameToRoot` are then the axis-aligned *bounding box* of the
     /// transformed view, not its true rect — which is what a consumer needs to
     /// know before trusting the geometry.

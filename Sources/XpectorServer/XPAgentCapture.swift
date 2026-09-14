@@ -290,8 +290,4 @@ enum XPAgentCapture {
         let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
-
-    private static func round2(_ value: Double) -> Double {
-        (value * 100).rounded() / 100
-    }
 }
