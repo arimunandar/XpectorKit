@@ -2079,8 +2079,10 @@ final class XPHttpLogServer: @unchecked Sendable {
         }
         return s;
       }
-      // Stable identity across captures (node UUIDs are reassigned every
-      // capture, so selection is re-matched by class + frame instead).
+      // Node ids are stable for a view's lifetime, so re-selection matches on id
+      // first. Class + frame stays as the fallback for the case an id cannot
+      // cover: the view was torn down and rebuilt between captures, which is a
+      // genuinely different object wearing the same position.
       function nodeKey(n) { return n.cls + '@' + (n.x | 0) + ',' + (n.y | 0) + ',' + (n.w | 0) + ',' + (n.h | 0); }
       // One live tick: re-capture, and rebuild only if the screen actually
       // changed — preserving the camera (rotation/zoom/explode) and re-selecting
@@ -2090,9 +2092,12 @@ final class XPHttpLogServer: @unchecked Sendable {
         fetch('/hierarchy').then(r => r.ok ? r.json() : Promise.reject(r.status)).then(data => {
           if (computeLayersSig(data) === layersSig) return;
           const prevKey = (selectedNodeId && treeRowEls[selectedNodeId]) ? nodeKey(treeRowEls[selectedNodeId]._node) : null;
+          const prevId = selectedNodeId;
           layersData = data;
           buildLayers();
-          if (prevKey) {
+          if (prevId && treeRowEls[prevId]) {
+            selectNode(prevId);                     // same view, same id
+          } else if (prevKey) {
             for (const id in treeRowEls) {
               if (nodeKey(treeRowEls[id]._node) === prevKey) { selectNode(id); break; }
             }
